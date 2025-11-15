@@ -1,12 +1,12 @@
 import * as vscode from "vscode";
 import { Configs } from "./configs";
+import { MemFS } from "./fileSystemProvider";
+import { QueueTask } from "./targets/Interfaces";
 import { Targets } from "./targets/Targets";
+import { GitExtension, Status } from "./typings/git";
 import fs = require("fs");
 import micromatch = require("micromatch");
 import parser = require("gitignore-parser");
-import { QueueTask } from "./targets/Interfaces";
-import { MemFS } from "./fileSystemProvider";
-import { GitExtension, Status } from "./typings/git";
 
 export class Extension {
     public static mode = process.env.APP_MODE ?? "prod";
@@ -14,6 +14,8 @@ export class Extension {
     public static outputChannel: vscode.OutputChannel | null;
     public static statusBarItem: vscode.StatusBarItem | null;
     private static lastErrorMessageTime: number = 0;
+    private static syncEnabled: boolean = true;
+    private static lastStatusBarClickTime: number = 0;
 
     public static init() {
         Extension.outputChannel = vscode.window.createOutputChannel("PRO Deployer");
@@ -40,6 +42,85 @@ export class Extension {
 
     public static getLastErrorMessageTime() {
         return Extension.lastErrorMessageTime;
+    }
+
+    public static isSyncEnabled() {
+        return Extension.syncEnabled;
+    }
+
+    public static setSyncEnabled(enabled: boolean) {
+        Extension.syncEnabled = enabled;
+        Extension.updateStatusBarItem();
+        Extension.appendLineToOutputChannel("Syncing " + (enabled ? "enabled" : "disabled"));
+    }
+
+    public static toggleSync() {
+        Extension.setSyncEnabled(!Extension.syncEnabled);
+    }
+
+    public static handleStatusBarClick() {
+        const now = Date.now();
+        const timeSinceLastClick = now - Extension.lastStatusBarClickTime;
+        Extension.lastStatusBarClickTime = now;
+
+        // Detect double-click (within 500ms)
+        if (timeSinceLastClick < 500) {
+            vscode.commands.executeCommand("pro-deployer.select-active-targets");
+        } else {
+            Extension.toggleSync();
+            const status = Extension.isSyncEnabled() ? "enabled" : "disabled";
+            vscode.window.showInformationMessage(`PRO Deployer syncing ${status}`);
+        }
+    }
+
+    public static selectActiveTargets() {
+        const allTargets = Targets.getItems();
+        if (allTargets.length === 0) {
+            Extension.showErrorMessage("No targets configured");
+            return;
+        }
+
+        const currentActiveTargets = Configs.getConfigs().activeTargets || [];
+        const quickPickItems = allTargets.map((target) => {
+            const isActive = currentActiveTargets.indexOf(target.getName()) !== -1;
+            return {
+                label: target.getName(),
+                picked: isActive,
+            };
+        });
+
+        vscode.window.showQuickPick(quickPickItems, {
+            canPickMany: true,
+            placeHolder: "Select active targets (currently: " + currentActiveTargets.join(", ") + ")",
+        }).then((selected) => {
+            if (selected === undefined) {
+                return;
+            }
+
+            const newActiveTargets = selected.map((item) => item.label);
+            Configs.getConfigs().activeTargets = newActiveTargets;
+            Extension.extensionContext.workspaceState.update("configs", {
+                activeTargets: newActiveTargets,
+            });
+            Extension.updateStatusBarItem();
+            Extension.appendLineToOutputChannel(
+                "Active targets updated: " + (newActiveTargets.length > 0 ? newActiveTargets.join(", ") : "none")
+            );
+            vscode.window.showInformationMessage(
+                "Active targets: " + (newActiveTargets.length > 0 ? newActiveTargets.join(", ") : "none")
+            );
+        });
+    }
+
+    public static updateStatusBarItem() {
+        if (Extension.statusBarItem && Configs.getConfigs().enableStatusBarItem) {
+            const icon = Extension.syncEnabled ? "$(sync)" : "$(debug-pause)";
+            const activeTargets = Targets.getActive();
+            const targetNames = activeTargets.length > 0 
+                ? ` (${activeTargets.map(t => t.getName()).join(", ")})`
+                : "";
+            Extension.statusBarItem.text = `${icon} PRO Deployer${targetNames}`;
+        }
     }
 
     public static appendLineToOutputChannel(string: string) {
@@ -138,9 +219,10 @@ export function activate(context: vscode.ExtensionContext) {
 
         if (Configs.getConfigs().enableStatusBarItem) {
             Extension.statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right);
-            Extension.statusBarItem.text = "$(sync) PRO Deployer";
-            Extension.statusBarItem.command = "pro-deployer.show-output-channel";
+            Extension.statusBarItem.command = "pro-deployer.handle-status-bar-click";
+            Extension.statusBarItem.tooltip = "Click to toggle syncing on/off | Double-click to select active targets";
             Extension.statusBarItem.show();
+            Extension.updateStatusBarItem();
         }
 
         let statusBarCheckTimer: NodeJS.Timeout | undefined = undefined;
@@ -148,7 +230,12 @@ export function activate(context: vscode.ExtensionContext) {
         Targets.getItems().forEach((target) => {
             target.getQueue().on("start", () => {
                 if (Configs.getConfigs().enableStatusBarItem) {
-                    Extension.statusBarItem!.text = "$(sync~spin) PRO Deployer";
+                    const icon = Extension.isSyncEnabled() ? "$(sync~spin)" : "$(debug-pause)";
+                    const activeTargets = Targets.getActive();
+                    const targetNames = activeTargets.length > 0 
+                        ? ` (${activeTargets.map(t => t.getName()).join(", ")})`
+                        : "";
+                    Extension.statusBarItem!.text = `${icon} PRO Deployer${targetNames}`;
 
                     if (!statusBarCheckTimer) {
                         statusBarCheckTimer = setInterval(() => {
@@ -220,8 +307,13 @@ export function activate(context: vscode.ExtensionContext) {
                     });
 
                     if (allPendingTasks === 0) {
-                        Extension.statusBarItem!.text = "$(sync) PRO Deployer";
-                        Extension.statusBarItem!.tooltip = "";
+                        const icon = Extension.isSyncEnabled() ? "$(sync)" : "$(debug-pause)";
+                        const activeTargets = Targets.getActive();
+                        const targetNames = activeTargets.length > 0 
+                            ? ` (${activeTargets.map(t => t.getName()).join(", ")})`
+                            : "";
+                        Extension.statusBarItem!.text = `${icon} PRO Deployer${targetNames}`;
+                        Extension.statusBarItem!.tooltip = "Click to toggle syncing on/off";
                         Extension.statusBarItem!.backgroundColor = undefined;
                         if (statusBarCheckTimer) {
                             clearInterval(statusBarCheckTimer);
@@ -272,7 +364,7 @@ export function activate(context: vscode.ExtensionContext) {
 
     fileWatcher.onDidCreate((uri) => {
         // console.log("onDidCreate", uri);
-        if (Configs.getWorkspaceConfigs(uri).uploadOnSave === false) {
+        if (!Extension.isSyncEnabled() || Configs.getConfigs().uploadOnSave === false) {
             return;
         }
         if (Extension.isUriIgnored(uri)) {
@@ -300,7 +392,7 @@ export function activate(context: vscode.ExtensionContext) {
     });
     fileWatcher.onDidChange((uri) => {
         // console.log("onDidChange", uri);
-        if (Configs.getWorkspaceConfigs(uri).uploadOnSave === false) {
+        if (!Extension.isSyncEnabled() || Configs.getConfigs().uploadOnSave === false) {
             return;
         }
         if (Extension.isUriIgnored(uri)) {
@@ -328,7 +420,7 @@ export function activate(context: vscode.ExtensionContext) {
     });
     fileWatcher.onDidDelete((uri) => {
         // console.log("onDidDelete", uri);
-        if (Configs.getWorkspaceConfigs(uri).autoDelete === false) {
+        if (!Extension.isSyncEnabled() || Configs.getConfigs().autoDelete === false) {
             return;
         }
         if (Extension.isUriIgnored(uri)) {
@@ -362,6 +454,23 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.commands.registerCommand("pro-deployer.generate-config-file", () => {
             Configs.generateConfigFile();
+        })
+    );
+    context.subscriptions.push(
+        vscode.commands.registerCommand("pro-deployer.toggle-sync", () => {
+            Extension.toggleSync();
+            const status = Extension.isSyncEnabled() ? "enabled" : "disabled";
+            vscode.window.showInformationMessage(`PRO Deployer syncing ${status}`);
+        })
+    );
+    context.subscriptions.push(
+        vscode.commands.registerCommand("pro-deployer.handle-status-bar-click", () => {
+            Extension.handleStatusBarClick();
+        })
+    );
+    context.subscriptions.push(
+        vscode.commands.registerCommand("pro-deployer.select-active-targets", () => {
+            Extension.selectActiveTargets();
         })
     );
     context.subscriptions.push(
