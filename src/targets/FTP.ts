@@ -1,13 +1,13 @@
 import Client = require("ftp");
-import { Extension } from "../extension";
-import { QueueTask, TargetInterface, TargetOptionsInterface } from "./Interfaces";
 import * as path from "path";
 import * as vscode from "vscode";
 import { Queue } from "../Queue";
-import EventEmitter = require("events");
 import { Configs } from "../configs";
-import { Targets } from "./Targets";
+import { Extension } from "../extension";
+import { QueueTask, TargetInterface, TargetOptionsInterface } from "./Interfaces";
 import { Target } from "./Target";
+import { Targets } from "./Targets";
+import EventEmitter = require("events");
 
 export class FTP extends Target implements TargetInterface {
     private client = new Client();
@@ -16,6 +16,9 @@ export class FTP extends Target implements TargetInterface {
     private isConnecting: boolean = false;
     private queue: Queue<QueueTask> = new Queue<QueueTask>();
     private creatingDirectories: Map<string, Promise<string>> = new Map([]);
+    private reconnectAttempts: number = 0;
+    private maxReconnectAttempts: number = 3;
+    private reconnectDelay: number = 2000;
 
     constructor(private options: TargetOptionsInterface, workspaceFolder: vscode.WorkspaceFolder) {
         super(workspaceFolder);
@@ -32,7 +35,7 @@ export class FTP extends Target implements TargetInterface {
             Extension.appendLineToOutputChannel("[INFO][FTP] Greeting: " + msg);
         });
         this.client.on("error", (error) => {
-            Extension.showErrorMessage("[ERROR][FTP] " + error);
+            this.handleConnectionError(error);
         });
         this.client.on("close", () => {
             this.isConnected = false;
@@ -423,5 +426,91 @@ export class FTP extends Target implements TargetInterface {
             this.queue.end();
             Extension.appendLineToOutputChannel("[INFO][FTP] The connection is destroyed");
         }
+    }
+
+    private isTimeoutError(error: any): boolean {
+        const errorStr = error.toString().toLowerCase();
+        return (
+            errorStr.includes("timeout") ||
+            errorStr.includes("etimedout") ||
+            errorStr.includes("econnreset") ||
+            errorStr.includes("econnrefused") ||
+            error.code === "ETIMEDOUT" ||
+            error.code === "ECONNRESET" ||
+            error.code === "ECONNREFUSED"
+        );
+    }
+
+    private handleConnectionError(error: any): void {
+        const config = Configs.getWorkspaceConfigs(this.getWorkspaceFolder().uri);
+        const shouldReconnect = config.reconnectOnTimeout ?? true;
+        const isTimeout = this.isTimeoutError(error);
+        
+        if (isTimeout && shouldReconnect && this.reconnectAttempts < this.maxReconnectAttempts) {
+            this.reconnectAttempts++;
+            Extension.appendLineToOutputChannel(
+                `[WARNING][FTP] Connection timeout/error detected. Attempting to reconnect (${this.reconnectAttempts}/${this.maxReconnectAttempts})...`
+            );
+            
+            setTimeout(() => {
+                this.reconnect();
+            }, this.reconnectDelay);
+        } else {
+            if (isTimeout && shouldReconnect && this.reconnectAttempts >= this.maxReconnectAttempts) {
+                Extension.showErrorMessage(
+                    `[ERROR][FTP] Failed to reconnect after ${this.maxReconnectAttempts} attempts: ` + error
+                );
+                Extension.setConnectionError(true);
+            } else {
+                Extension.showErrorMessage("[ERROR][FTP] " + error);
+            }
+            this.reconnectAttempts = 0;
+        }
+    }
+
+    private reconnect(): void {
+        Extension.appendLineToOutputChannel("[INFO][FTP] Reconnecting...");
+        this.isConnected = false;
+        this.isConnecting = false;
+        
+        // Destroy old client and create new one
+        try {
+            this.client.destroy();
+        } catch (err) {
+            // Ignore errors when destroying
+        }
+        
+        this.client = new Client();
+        this.client.setMaxListeners(10000);
+        
+        // Re-attach event handlers
+        this.client.on("greeting", (msg) => {
+            Extension.appendLineToOutputChannel("[INFO][FTP] Greeting: " + msg);
+        });
+        this.client.on("error", (error) => {
+            this.handleConnectionError(error);
+        });
+        this.client.on("close", () => {
+            this.isConnected = false;
+            this.isConnecting = false;
+            Extension.appendLineToOutputChannel("[INFO][FTP] The connection is closed");
+        });
+        this.client.on("end", () => {
+            this.isConnected = false;
+            this.isConnecting = false;
+            Extension.appendLineToOutputChannel("[INFO][FTP] The connection is ended");
+        });
+        
+        // Attempt to connect
+        this.connect(
+            () => {
+                Extension.appendLineToOutputChannel("[INFO][FTP] Successfully reconnected");
+                Extension.setConnectionError(false);
+                this.reconnectAttempts = 0;
+            },
+            (error: any) => {
+                Extension.appendLineToOutputChannel("[ERROR][FTP] Reconnection failed: " + error);
+            }
+        );
     }
 }

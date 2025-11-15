@@ -1,12 +1,12 @@
 import * as vscode from "vscode";
 import { Configs } from "./configs";
+import { MemFS } from "./fileSystemProvider";
+import { QueueTask } from "./targets/Interfaces";
 import { Targets } from "./targets/Targets";
+import { GitExtension, Status } from "./typings/git";
 import fs = require("fs");
 import micromatch = require("micromatch");
 import parser = require("gitignore-parser");
-import { QueueTask } from "./targets/Interfaces";
-import { MemFS } from "./fileSystemProvider";
-import { GitExtension, Status } from "./typings/git";
 
 export class Extension {
     public static mode = process.env.APP_MODE ?? "prod";
@@ -57,6 +57,20 @@ export class Extension {
                 vscode.commands.executeCommand("pro-deployer.show-output-channel");
             }
         });
+    }
+
+    public static setConnectionError(hasError: boolean) {
+        if (Extension.statusBarItem && Configs.getConfigs().enableStatusBarItem) {
+            if (hasError) {
+                Extension.statusBarItem.text = "$(warning) PRO Deployer";
+                Extension.statusBarItem.backgroundColor = new vscode.ThemeColor("statusBarItem.errorBackground");
+                Extension.statusBarItem.tooltip = "Connection error - unable to reconnect";
+            } else {
+                Extension.statusBarItem.text = "$(sync) PRO Deployer";
+                Extension.statusBarItem.backgroundColor = undefined;
+                Extension.statusBarItem.tooltip = "";
+            }
+        }
     }
 
     public static isLikeFile(uri: vscode.Uri): Promise<boolean> {
