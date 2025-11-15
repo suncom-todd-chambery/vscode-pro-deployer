@@ -14,6 +14,7 @@ export class Extension {
     public static statusBarItem: vscode.StatusBarItem | null;
     private static lastErrorMessageTime: number = 0;
     private static syncEnabled: boolean = true;
+    private static lastStatusBarClickTime: number = 0;
 
     public static init() {
         Extension.outputChannel = vscode.window.createOutputChannel("PRO Deployer");
@@ -46,6 +47,60 @@ export class Extension {
 
     public static toggleSync() {
         Extension.setSyncEnabled(!Extension.syncEnabled);
+    }
+
+    public static handleStatusBarClick() {
+        const now = Date.now();
+        const timeSinceLastClick = now - Extension.lastStatusBarClickTime;
+        Extension.lastStatusBarClickTime = now;
+
+        // Detect double-click (within 500ms)
+        if (timeSinceLastClick < 500) {
+            vscode.commands.executeCommand("pro-deployer.select-active-targets");
+        } else {
+            Extension.toggleSync();
+            const status = Extension.isSyncEnabled() ? "enabled" : "disabled";
+            vscode.window.showInformationMessage(`PRO Deployer syncing ${status}`);
+        }
+    }
+
+    public static selectActiveTargets() {
+        const allTargets = Targets.getItems();
+        if (allTargets.length === 0) {
+            Extension.showErrorMessage("No targets configured");
+            return;
+        }
+
+        const currentActiveTargets = Configs.getConfigs().activeTargets || [];
+        const quickPickItems = allTargets.map((target) => {
+            const isActive = currentActiveTargets.indexOf(target.getName()) !== -1;
+            return {
+                label: target.getName(),
+                picked: isActive,
+            };
+        });
+
+        vscode.window.showQuickPick(quickPickItems, {
+            canPickMany: true,
+            placeHolder: "Select active targets (currently: " + currentActiveTargets.join(", ") + ")",
+        }).then((selected) => {
+            if (selected === undefined) {
+                return;
+            }
+
+            const newActiveTargets = selected.map((item) => item.label);
+            Configs.getConfigs().activeTargets = newActiveTargets;
+            Extension.extensionContext.workspaceState.update("configs", {
+                activeTargets: newActiveTargets,
+            });
+            Extension.updateStatusBarItem();
+            Extension.appendLineToOutputChannel(
+                "Active targets updated: " + (newActiveTargets.length > 0 ? newActiveTargets.join(", ") : "none")
+            );
+            vscode.window.showInformationMessage(
+                "Active targets: " + (newActiveTargets.length > 0 ? newActiveTargets.join(", ") : "none")
+            );
+        });
     }
 
     public static updateStatusBarItem() {
@@ -155,8 +210,8 @@ export function activate(context: vscode.ExtensionContext) {
 
         if (Configs.getConfigs().enableStatusBarItem) {
             Extension.statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right);
-            Extension.statusBarItem.command = "pro-deployer.toggle-sync";
-            Extension.statusBarItem.tooltip = "Click to toggle syncing on/off";
+            Extension.statusBarItem.command = "pro-deployer.handle-status-bar-click";
+            Extension.statusBarItem.tooltip = "Click to toggle syncing on/off | Double-click to select active targets";
             Extension.statusBarItem.show();
             Extension.updateStatusBarItem();
         }
@@ -389,6 +444,16 @@ export function activate(context: vscode.ExtensionContext) {
             Extension.toggleSync();
             const status = Extension.isSyncEnabled() ? "enabled" : "disabled";
             vscode.window.showInformationMessage(`PRO Deployer syncing ${status}`);
+        })
+    );
+    context.subscriptions.push(
+        vscode.commands.registerCommand("pro-deployer.handle-status-bar-click", () => {
+            Extension.handleStatusBarClick();
+        })
+    );
+    context.subscriptions.push(
+        vscode.commands.registerCommand("pro-deployer.select-active-targets", () => {
+            Extension.selectActiveTargets();
         })
     );
     context.subscriptions.push(
