@@ -1,0 +1,51 @@
+{ 
+  "enableStatusBarItem": true, 
+  "enableQuickPick": true,
+  "uploadOnSave": true,
+  "autoDelete": true,
+  "checkGitignore": false,
+  "activeTargets": [
+  ],
+  "concurrency": 5, 
+  "ignore": [ 
+    ".git/**/*",
+    ".vscode/**/*",
+    "dist/**/*",
+    "local_keystore/**/*",
+    "node_modules/**/*",
+    ".github/**/*",
+    "local.json",
+    ".env"
+  ],
+  "include": [
+    "src/**/bridge/**/*",
+    "src/**/DetailInterface/**/*",
+    "src/**/ServiceInstallationStage/**/*"
+  ],
+  "targets": [
+    {
+      "name": "dev",
+      "type": "sftp",
+      "host": "dms-udws001.dms.dcs.sdc.state.fl.us",
+      "port": 22,
+      "user": "usrcsab",
+      "password": null,
+      "dir": "/var/www/html/csab/leaf2/current",
+      "baseDir": "/",
+      "privateKey": "/Users/chambet/.ssh/csab_rsa",
+      "passphrase": null
+    },
+    {
+      "name": "QA",
+      "type": "sftp",
+      "host": "dms-utws001.dms.dcs.sdc.state.fl.us",
+      "port": 22,
+      "user": "usrcsab",
+      "password": null,
+      "dir": "/var/www/html/csab/leaf2/current",
+      "baseDir": "/",
+      "privateKey": "/home/chambery/.ssh/csab_rsa",
+      "passphrase": null
+    }
+  ]
+} 
