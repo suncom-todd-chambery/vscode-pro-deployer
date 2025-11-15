@@ -140,6 +140,20 @@ export class Extension {
         });
     }
 
+    public static setConnectionError(hasError: boolean) {
+        if (Extension.statusBarItem && Configs.getConfigs().enableStatusBarItem) {
+            if (hasError) {
+                Extension.statusBarItem.text = "$(warning) PRO Deployer";
+                Extension.statusBarItem.backgroundColor = new vscode.ThemeColor("statusBarItem.errorBackground");
+                Extension.statusBarItem.tooltip = "Connection error - unable to reconnect";
+            } else {
+                Extension.statusBarItem.text = "$(sync) PRO Deployer";
+                Extension.statusBarItem.backgroundColor = undefined;
+                Extension.statusBarItem.tooltip = "";
+            }
+        }
+    }
+
     public static isLikeFile(uri: vscode.Uri): Promise<boolean> {
         return new Promise<boolean>((resolve, reject) => {
             vscode.workspace.fs.stat(uri).then(
