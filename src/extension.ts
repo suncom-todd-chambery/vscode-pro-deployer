@@ -51,7 +51,11 @@ export class Extension {
     public static updateStatusBarItem() {
         if (Extension.statusBarItem && Configs.getConfigs().enableStatusBarItem) {
             const icon = Extension.syncEnabled ? "$(sync)" : "$(debug-pause)";
-            Extension.statusBarItem.text = `${icon} PRO Deployer`;
+            const activeTargets = Targets.getActive();
+            const targetNames = activeTargets.length > 0 
+                ? ` (${activeTargets.map(t => t.getName()).join(", ")})`
+                : "";
+            Extension.statusBarItem.text = `${icon} PRO Deployer${targetNames}`;
         }
     }
 
@@ -151,7 +155,6 @@ export function activate(context: vscode.ExtensionContext) {
 
         if (Configs.getConfigs().enableStatusBarItem) {
             Extension.statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right);
-            Extension.statusBarItem.text = "$(sync) PRO Deployer";
             Extension.statusBarItem.command = "pro-deployer.toggle-sync";
             Extension.statusBarItem.tooltip = "Click to toggle syncing on/off";
             Extension.statusBarItem.show();
@@ -164,7 +167,11 @@ export function activate(context: vscode.ExtensionContext) {
             target.getQueue().on("start", () => {
                 if (Configs.getConfigs().enableStatusBarItem) {
                     const icon = Extension.isSyncEnabled() ? "$(sync~spin)" : "$(debug-pause)";
-                    Extension.statusBarItem!.text = `${icon} PRO Deployer`;
+                    const activeTargets = Targets.getActive();
+                    const targetNames = activeTargets.length > 0 
+                        ? ` (${activeTargets.map(t => t.getName()).join(", ")})`
+                        : "";
+                    Extension.statusBarItem!.text = `${icon} PRO Deployer${targetNames}`;
 
                     if (!statusBarCheckTimer) {
                         statusBarCheckTimer = setInterval(() => {
@@ -237,7 +244,11 @@ export function activate(context: vscode.ExtensionContext) {
 
                     if (allPendingTasks === 0) {
                         const icon = Extension.isSyncEnabled() ? "$(sync)" : "$(debug-pause)";
-                        Extension.statusBarItem!.text = `${icon} PRO Deployer`;
+                        const activeTargets = Targets.getActive();
+                        const targetNames = activeTargets.length > 0 
+                            ? ` (${activeTargets.map(t => t.getName()).join(", ")})`
+                            : "";
+                        Extension.statusBarItem!.text = `${icon} PRO Deployer${targetNames}`;
                         Extension.statusBarItem!.tooltip = "Click to toggle syncing on/off";
                         Extension.statusBarItem!.backgroundColor = undefined;
                         if (statusBarCheckTimer) {
