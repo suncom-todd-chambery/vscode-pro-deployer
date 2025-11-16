@@ -168,34 +168,26 @@ function setupGitMonitoring() {
 }
 
 function monitorRepository(repository: any) {
-    // Monitor repository state changes to detect git operations
+    let currentBranch = repository.state.HEAD?.name;
+    
+    // Monitor repository state changes to detect branch changes
     repository.state.onDidChange(() => {
         const state = repository.state;
+        const newBranch = state.HEAD?.name;
         
-        // Detect if there are ongoing operations
-        const hasOngoingOperations = 
-            state.mergeChanges.length > 0 ||
-            state.rebaseCommit !== undefined;
-        
-        if (hasOngoingOperations) {
+        // Detect if branch changed
+        if (currentBranch !== newBranch) {
+            Extension.appendLineToOutputChannel(`[INFO] Branch change detected: ${currentBranch} -> ${newBranch}`);
             Extension.startGitOperation();
-        } else {
-            // Check if operation just completed
-            if (Extension.isGitOperationActive()) {
-                // Add a small delay to ensure all file changes are processed
-                setTimeout(() => {
-                    Extension.endGitOperation();
-                }, 1000);
-            }
+            
+            // Update current branch
+            currentBranch = newBranch;
+            
+            // Add delay to ensure all file changes from branch switch are processed
+            setTimeout(() => {
+                Extension.endGitOperation();
+            }, 2000);
         }
-    });
-
-    // Monitor when commits happen
-    repository.onDidCommit(() => {
-        Extension.startGitOperation();
-        setTimeout(() => {
-            Extension.endGitOperation();
-        }, 2000);
     });
 
     Extension.appendLineToOutputChannel("[INFO] Monitoring git repository: " + repository.rootUri.fsPath);
