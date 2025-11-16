@@ -1,12 +1,12 @@
 import * as vscode from "vscode";
 import { Configs } from "./configs";
+import { MemFS } from "./fileSystemProvider";
+import { QueueTask } from "./targets/Interfaces";
 import { Targets } from "./targets/Targets";
+import { GitExtension, Status } from "./typings/git";
 import fs = require("fs");
 import micromatch = require("micromatch");
 import parser = require("gitignore-parser");
-import { QueueTask } from "./targets/Interfaces";
-import { MemFS } from "./fileSystemProvider";
-import { GitExtension, Status } from "./typings/git";
 
 export class Extension {
     public static mode = process.env.APP_MODE ?? "prod";
@@ -14,6 +14,8 @@ export class Extension {
     public static outputChannel: vscode.OutputChannel | null;
     public static statusBarItem: vscode.StatusBarItem | null;
     private static lastErrorMessageTime: number = 0;
+    private static isGitOperationInProgress: boolean = false;
+    private static gitOperationCount: number = 0;
 
     public static init() {
         Extension.outputChannel = vscode.window.createOutputChannel("PRO Deployer");
@@ -57,6 +59,27 @@ export class Extension {
                 vscode.commands.executeCommand("pro-deployer.show-output-channel");
             }
         });
+    }
+
+    public static isGitOperationActive(): boolean {
+        return Extension.isGitOperationInProgress;
+    }
+
+    public static startGitOperation(): void {
+        Extension.gitOperationCount++;
+        if (!Extension.isGitOperationInProgress) {
+            Extension.isGitOperationInProgress = true;
+            Extension.appendLineToOutputChannel("[INFO] Git operation started - syncing paused");
+        }
+    }
+
+    public static endGitOperation(): void {
+        Extension.gitOperationCount--;
+        if (Extension.gitOperationCount <= 0) {
+            Extension.gitOperationCount = 0;
+            Extension.isGitOperationInProgress = false;
+            Extension.appendLineToOutputChannel("[INFO] Git operation completed - syncing resumed");
+        }
     }
 
     public static isLikeFile(uri: vscode.Uri): Promise<boolean> {
@@ -118,6 +141,66 @@ export class Extension {
     }
 }
 
+function setupGitMonitoring() {
+    if (!Configs.getConfigs().pauseDuringGitOperations) {
+        return;
+    }
+
+    const gitExtension = vscode.extensions.getExtension<GitExtension>("vscode.git");
+    if (!gitExtension) {
+        Extension.appendLineToOutputChannel("[INFO] Git extension not found - git operation monitoring disabled");
+        return;
+    }
+
+    const git = gitExtension.exports.getAPI(1);
+    
+    // Monitor all repositories
+    git.repositories.forEach((repository) => {
+        monitorRepository(repository);
+    });
+
+    // Monitor new repositories
+    git.onDidOpenRepository((repository) => {
+        monitorRepository(repository);
+    });
+
+    Extension.appendLineToOutputChannel("[INFO] Git operation monitoring enabled");
+}
+
+function monitorRepository(repository: any) {
+    // Monitor repository state changes to detect git operations
+    repository.state.onDidChange(() => {
+        const state = repository.state;
+        
+        // Detect if there are ongoing operations
+        const hasOngoingOperations = 
+            state.mergeChanges.length > 0 ||
+            state.rebaseCommit !== undefined;
+        
+        if (hasOngoingOperations) {
+            Extension.startGitOperation();
+        } else {
+            // Check if operation just completed
+            if (Extension.isGitOperationActive()) {
+                // Add a small delay to ensure all file changes are processed
+                setTimeout(() => {
+                    Extension.endGitOperation();
+                }, 1000);
+            }
+        }
+    });
+
+    // Monitor when commits happen
+    repository.onDidCommit(() => {
+        Extension.startGitOperation();
+        setTimeout(() => {
+            Extension.endGitOperation();
+        }, 2000);
+    });
+
+    Extension.appendLineToOutputChannel("[INFO] Monitoring git repository: " + repository.rootUri.fsPath);
+}
+
 // this method is called when your extension is activated
 // your extension is activated the very first time the command is executed
 export function activate(context: vscode.ExtensionContext) {
@@ -135,6 +218,9 @@ export function activate(context: vscode.ExtensionContext) {
                 Targets.add(target);
             }
         });
+
+        // Set up git operation monitoring
+        setupGitMonitoring();
 
         if (Configs.getConfigs().enableStatusBarItem) {
             Extension.statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right);
@@ -275,6 +361,10 @@ export function activate(context: vscode.ExtensionContext) {
         if (Configs.getWorkspaceConfigs(uri).uploadOnSave === false) {
             return;
         }
+        if (Configs.getWorkspaceConfigs(uri).pauseDuringGitOperations && Extension.isGitOperationActive()) {
+            Extension.appendLineToOutputChannel("[INFO] Skipping upload - git operation in progress: " + vscode.workspace.asRelativePath(uri.path));
+            return;
+        }
         if (Extension.isUriIgnored(uri)) {
             return;
         }
@@ -303,6 +393,10 @@ export function activate(context: vscode.ExtensionContext) {
         if (Configs.getWorkspaceConfigs(uri).uploadOnSave === false) {
             return;
         }
+        if (Configs.getWorkspaceConfigs(uri).pauseDuringGitOperations && Extension.isGitOperationActive()) {
+            Extension.appendLineToOutputChannel("[INFO] Skipping upload - git operation in progress: " + vscode.workspace.asRelativePath(uri.path));
+            return;
+        }
         if (Extension.isUriIgnored(uri)) {
             return;
         }
@@ -329,6 +423,10 @@ export function activate(context: vscode.ExtensionContext) {
     fileWatcher.onDidDelete((uri) => {
         // console.log("onDidDelete", uri);
         if (Configs.getWorkspaceConfigs(uri).autoDelete === false) {
+            return;
+        }
+        if (Configs.getWorkspaceConfigs(uri).pauseDuringGitOperations && Extension.isGitOperationActive()) {
+            Extension.appendLineToOutputChannel("[INFO] Skipping delete - git operation in progress: " + vscode.workspace.asRelativePath(uri.path));
             return;
         }
         if (Extension.isUriIgnored(uri)) {
