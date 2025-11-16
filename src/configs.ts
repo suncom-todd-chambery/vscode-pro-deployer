@@ -11,6 +11,7 @@ export class Configs {
         autoDelete: true,
         checkGitignore: false,
         reconnectOnTimeout: true,
+        pauseDuringGitOperations: true,
         activeTargets: ["My SFTP"],
         concurrency: 5,
         ignore: [".git/**/*", ".vscode/**/*"],
@@ -50,6 +51,7 @@ export class Configs {
         checkGitignore: false,
         concurrency: 5,
         reconnectOnTimeout: true,
+        pauseDuringGitOperations: true,
         ignore: [".git/**/*", ".vscode/**/*"],
         include: [],
         activeTargets: [],
@@ -97,7 +99,7 @@ export class Configs {
         const targets = [] as { options: TargetOptionsInterface; workspaceFolder: vscode.WorkspaceFolder }[];
         Object.keys(this.workspaceConfigs).forEach((key) => {
             if (this.workspaceConfigs[key].targets) {
-                this.workspaceConfigs[key].targets.forEach((target) => {
+                this.workspaceConfigs[key].targets?.forEach((target) => {
                     targets.push({
                         options: target,
                         workspaceFolder: vscode.workspace.getWorkspaceFolder(vscode.Uri.file(key))!,
@@ -142,7 +144,7 @@ export class Configs {
         );
     }
     public static init(cb: Function) {
-        const promises = [] as Thenable<Uint8Array<ArrayBufferLike>>[];
+        const promises = [] as Thenable<Uint8Array>[];
         this.getWorkspaceConfigFiles().forEach((file, index) => {
             const promise = vscode.workspace.fs.readFile(file);
             promises.push(promise);
