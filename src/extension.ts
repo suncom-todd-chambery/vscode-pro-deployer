@@ -72,7 +72,7 @@ export class Extension {
             const targetNames = activeTargets.length > 0
                 ? ` (${activeTargets.map(t => t.getName()).join(", ")})`
                 : "";
-            Extension.statusBarItem.text = `${icon} PRO Deployer${targetNames}`;
+            Extension.statusBarItem.text = `${icon} PRO Deployer+${targetNames}`;
         }
     }
 
@@ -96,11 +96,11 @@ export class Extension {
     public static setConnectionError(hasError: boolean) {
         if (Extension.statusBarItem && Configs.getConfigs().enableStatusBarItem) {
             if (hasError) {
-                Extension.statusBarItem.text = "$(warning) PRO Deployer";
+                Extension.statusBarItem.text = "$(warning) PRO Deployer+";
                 Extension.statusBarItem.backgroundColor = new vscode.ThemeColor("statusBarItem.errorBackground");
                 Extension.statusBarItem.tooltip = "Connection error - unable to reconnect";
             } else {
-                Extension.statusBarItem.text = "$(sync) PRO Deployer";
+                Extension.statusBarItem.text = "$(sync) PRO Deployer+";
                 Extension.statusBarItem.backgroundColor = undefined;
                 Extension.statusBarItem.tooltip = "";
             }
@@ -278,7 +278,7 @@ export function activate(context: vscode.ExtensionContext) {
                     const targetNames = activeTargets.length > 0
                         ? ` (${activeTargets.map(t => t.getName()).join(", ")})`
                         : "";
-                    Extension.statusBarItem!.text = `${icon} PRO Deployer${targetNames}`;
+                    Extension.statusBarItem!.text = `${icon} PRO Deployer+${targetNames}`;
 
                     if (!statusBarCheckTimer) {
                         statusBarCheckTimer = setInterval(() => {
@@ -288,7 +288,7 @@ export function activate(context: vscode.ExtensionContext) {
                             });
                             if (allPendingTasks > 1) {
                                 Extension.statusBarItem!.text =
-                                    "$(sync~spin) PRO Deployer: " + (allPendingTasks + 1) + "...";
+                                    "$(sync~spin) PRO Deployer+: " + (allPendingTasks + 1) + "...";
                                 Extension.statusBarItem!.tooltip = tooltipText;
                             }
                         }, 300);
@@ -355,7 +355,7 @@ export function activate(context: vscode.ExtensionContext) {
                         const targetNames = activeTargets.length > 0
                             ? ` (${activeTargets.map(t => t.getName()).join(", ")})`
                             : "";
-                        Extension.statusBarItem!.text = `${icon} PRO Deployer${targetNames}`;
+                        Extension.statusBarItem!.text = `${icon} PRO Deployer+${targetNames}`;
                         Extension.statusBarItem!.tooltip = "Click to toggle syncing on/off";
                         Extension.statusBarItem!.backgroundColor = undefined;
                         if (statusBarCheckTimer) {
@@ -515,7 +515,7 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand("pro-deployer.toggle-sync", () => {
             Extension.toggleSync();
             const status = Extension.isSyncEnabled() ? "enabled" : "disabled";
-            vscode.window.showInformationMessage(`PRO Deployer syncing ${status}`);
+            vscode.window.showInformationMessage(`PRO Deployer+ syncing ${status}`);
         })
     );
     context.subscriptions.push(
