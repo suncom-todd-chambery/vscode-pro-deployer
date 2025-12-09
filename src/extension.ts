@@ -14,6 +14,7 @@ export class Extension {
     public static outputChannel: vscode.OutputChannel | null;
     public static statusBarItem: vscode.StatusBarItem | null;
     private static lastErrorMessageTime: number = 0;
+    private static lastIgnoreLogTime: number = 0;
 
     public static init() {
         Extension.outputChannel = vscode.window.createOutputChannel("PRO Deployer");
@@ -97,7 +98,10 @@ export class Extension {
             return true;
         }
         if (micromatch.isMatch(relativePath, Configs.getWorkspaceConfigs(uri).ignore)) {
-            Extension.appendLineToOutputChannel("File/folder ignored (ignore option): " + relativePath);
+            if (Date.now() - Extension.lastIgnoreLogTime >= 30000) {
+                Extension.appendLineToOutputChannel("File/folder ignored (ignore option): " + relativePath);
+                Extension.lastIgnoreLogTime = Date.now();
+            }
             return true;
         }
         if (Configs.getWorkspaceConfigs(uri).include.length > 0) {
@@ -246,12 +250,12 @@ export function activate(context: vscode.ExtensionContext) {
                 if (!Extension.getLastErrorMessageTime() || Date.now() - Extension.getLastErrorMessageTime() >= 1000) {
                     Extension.showErrorMessage(
                         target.getName() +
-                            " => Can't " +
-                            job.action +
-                            " file: " +
-                            vscode.workspace.asRelativePath(job.uri) +
-                            ". Details: " +
-                            error
+                        " => Can't " +
+                        job.action +
+                        " file: " +
+                        vscode.workspace.asRelativePath(job.uri) +
+                        ". Details: " +
+                        error
                     );
                 }
                 if (Configs.getConfigs().enableStatusBarItem) {
