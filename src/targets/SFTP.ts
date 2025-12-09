@@ -1,13 +1,13 @@
-import { Extension } from "../extension";
-import { QueueTask, TargetInterface, TargetOptionsInterface } from "./Interfaces";
 import * as path from "path";
 import * as vscode from "vscode";
-import ssh2 = require("ssh2");
 import { Queue } from "../Queue";
 import { Configs } from "../configs";
-import EventEmitter = require("events");
-import { Targets } from "./Targets";
+import { Extension } from "../extension";
+import { QueueTask, TargetInterface, TargetOptionsInterface } from "./Interfaces";
 import { Target } from "./Target";
+import { Targets } from "./Targets";
+import ssh2 = require("ssh2");
+import EventEmitter = require("events");
 
 export class SFTP extends Target implements TargetInterface {
     private client = new ssh2.Client();
@@ -17,6 +17,9 @@ export class SFTP extends Target implements TargetInterface {
     private isConnecting: boolean = false;
     private queue: Queue<QueueTask> = new Queue<QueueTask>();
     private creatingDirectories: Map<string, Promise<string>> = new Map([]);
+    private reconnectAttempts: number = 0;
+    private maxReconnectAttempts: number = 3;
+    private reconnectDelay: number = 2000;
 
     constructor(private options: TargetOptionsInterface, workspaceFolder: vscode.WorkspaceFolder) {
         super(workspaceFolder);
@@ -30,7 +33,7 @@ export class SFTP extends Target implements TargetInterface {
 
         this.client.setMaxListeners(10000);
         this.client.on("error", (error: any) => {
-            Extension.appendLineToOutputChannel("[ERROR][SFTP] " + error);
+            this.handleConnectionError(error);
         });
         this.client.on("close", () => {
             this.isConnected = false;
@@ -486,5 +489,91 @@ export class SFTP extends Target implements TargetInterface {
             this.queue.end();
             Extension.appendLineToOutputChannel("[INFO][SFTP] The connection is destroyed");
         }
+    }
+
+    private isTimeoutError(error: any): boolean {
+        const errorStr = error.toString().toLowerCase();
+        return (
+            errorStr.includes("timeout") ||
+            errorStr.includes("etimedout") ||
+            errorStr.includes("econnreset") ||
+            errorStr.includes("econnrefused") ||
+            error.code === "ETIMEDOUT" ||
+            error.code === "ECONNRESET" ||
+            error.code === "ECONNREFUSED" ||
+            error.level === "client-timeout" ||
+            error.level === "client-socket"
+        );
+    }
+
+    private handleConnectionError(error: any): void {
+        const config = Configs.getWorkspaceConfigs(this.getWorkspaceFolder().uri);
+        const shouldReconnect = config.reconnectOnTimeout ?? true;
+        const isTimeout = this.isTimeoutError(error);
+        
+        if (isTimeout && shouldReconnect && this.reconnectAttempts < this.maxReconnectAttempts) {
+            this.reconnectAttempts++;
+            Extension.appendLineToOutputChannel(
+                `[WARNING][SFTP] Connection timeout/error detected. Attempting to reconnect (${this.reconnectAttempts}/${this.maxReconnectAttempts})...`
+            );
+            
+            setTimeout(() => {
+                this.reconnect();
+            }, this.reconnectDelay);
+        } else {
+            if (isTimeout && shouldReconnect && this.reconnectAttempts >= this.maxReconnectAttempts) {
+                Extension.showErrorMessage(
+                    `[ERROR][SFTP] Failed to reconnect after ${this.maxReconnectAttempts} attempts: ` + error
+                );
+                Extension.setConnectionError(true);
+            } else {
+                Extension.appendLineToOutputChannel("[ERROR][SFTP] " + error);
+            }
+            this.reconnectAttempts = 0;
+        }
+    }
+
+    private reconnect(): void {
+        Extension.appendLineToOutputChannel("[INFO][SFTP] Reconnecting...");
+        this.isConnected = false;
+        this.isConnecting = false;
+        this.sftp = null;
+        
+        // Destroy old client and create new one
+        try {
+            this.client.end();
+        } catch (err) {
+            // Ignore errors when destroying
+        }
+        
+        this.client = new ssh2.Client();
+        this.client.setMaxListeners(10000);
+        
+        // Re-attach event handlers
+        this.client.on("error", (error: any) => {
+            this.handleConnectionError(error);
+        });
+        this.client.on("close", () => {
+            this.isConnected = false;
+            this.isConnecting = false;
+            Extension.appendLineToOutputChannel("[INFO][SFTP] The connection is closed");
+        });
+        this.client.on("end", () => {
+            this.isConnected = false;
+            this.isConnecting = false;
+            Extension.appendLineToOutputChannel("[INFO][SFTP] The connection is ended");
+        });
+        
+        // Attempt to connect
+        this.connect(
+            () => {
+                Extension.appendLineToOutputChannel("[INFO][SFTP] Successfully reconnected");
+                Extension.setConnectionError(false);
+                this.reconnectAttempts = 0;
+            },
+            (error: any) => {
+                Extension.appendLineToOutputChannel("[ERROR][SFTP] Reconnection failed: " + error);
+            }
+        );
     }
 }

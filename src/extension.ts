@@ -1,12 +1,12 @@
 import * as vscode from "vscode";
 import { Configs } from "./configs";
+import { MemFS } from "./fileSystemProvider";
+import { QueueTask } from "./targets/Interfaces";
 import { Targets } from "./targets/Targets";
+import { GitExtension, Status } from "./typings/git";
 import fs = require("fs");
 import micromatch = require("micromatch");
 import parser = require("gitignore-parser");
-import { QueueTask } from "./targets/Interfaces";
-import { MemFS } from "./fileSystemProvider";
-import { GitExtension, Status } from "./typings/git";
 
 export class Extension {
     public static mode = process.env.APP_MODE ?? "prod";
@@ -15,6 +15,9 @@ export class Extension {
     public static statusBarItem: vscode.StatusBarItem | null;
     private static lastErrorMessageTime: number = 0;
     private static lastIgnoreLogTime: number = 0;
+    private static syncEnabled: boolean = true;
+    private static isGitOperationInProgress: boolean = false;
+    private static gitOperationCount: number = 0;
 
     public static init() {
         Extension.outputChannel = vscode.window.createOutputChannel("PRO Deployer");
@@ -43,6 +46,37 @@ export class Extension {
         return Extension.lastErrorMessageTime;
     }
 
+    public static isSyncEnabled() {
+        return Extension.syncEnabled;
+    }
+
+    public static setSyncEnabled(enabled: boolean) {
+        Extension.syncEnabled = enabled;
+        Extension.updateStatusBarItem();
+        Extension.appendLineToOutputChannel("Syncing " + (enabled ? "enabled" : "disabled"));
+    }
+
+    public static toggleSync() {
+        Extension.setSyncEnabled(!Extension.syncEnabled);
+    }
+
+    public static handleStatusBarClick() {
+        Extension.toggleSync();
+        const status = Extension.isSyncEnabled() ? "enabled" : "disabled";
+        vscode.window.showInformationMessage(`PRO Deployer syncing ${status}`);
+    }
+
+    public static updateStatusBarItem() {
+        if (Extension.statusBarItem && Configs.getConfigs().enableStatusBarItem) {
+            const icon = Extension.syncEnabled ? "$(sync)" : "$(debug-pause)";
+            const activeTargets = Targets.getActive();
+            const targetNames = activeTargets.length > 0
+                ? ` (${activeTargets.map(t => t.getName()).join(", ")})`
+                : "";
+            Extension.statusBarItem.text = `${icon} PRO Deployer+${targetNames}`;
+        }
+    }
+
     public static appendLineToOutputChannel(string: string) {
         const date = new Date();
         if (Extension.outputChannel) {
@@ -50,14 +84,49 @@ export class Extension {
         }
     }
 
-    public static showErrorMessage(string: string) {
+    public static async showErrorMessage(string: string) {
         Extension.appendLineToOutputChannel("[ERROR][showErrorMessage] " + string);
         Extension.lastErrorMessageTime = Date.now();
-        return vscode.window.showErrorMessage("[PRO Deployer] " + string, "Show output channel").then((value) => {
-            if (value === "Show output channel") {
-                vscode.commands.executeCommand("pro-deployer.show-output-channel");
+        const value = await vscode.window.showErrorMessage("[PRO Deployer] " + string, "Show output channel");
+        if (value === "Show output channel") {
+            vscode.commands.executeCommand("pro-deployer.show-output-channel");
+        }
+    }
+
+
+    public static setConnectionError(hasError: boolean) {
+        if (Extension.statusBarItem && Configs.getConfigs().enableStatusBarItem) {
+            if (hasError) {
+                Extension.statusBarItem.text = "$(warning) PRO Deployer+";
+                Extension.statusBarItem.backgroundColor = new vscode.ThemeColor("statusBarItem.errorBackground");
+                Extension.statusBarItem.tooltip = "Connection error - unable to reconnect";
+            } else {
+                Extension.statusBarItem.text = "$(sync) PRO Deployer+";
+                Extension.statusBarItem.backgroundColor = undefined;
+                Extension.statusBarItem.tooltip = "";
             }
-        });
+        }
+    }
+
+    public static isGitOperationActive(): boolean {
+        return Extension.isGitOperationInProgress;
+    }
+
+    public static startGitOperation(): void {
+        Extension.gitOperationCount++;
+        if (!Extension.isGitOperationInProgress) {
+            Extension.isGitOperationInProgress = true;
+            Extension.appendLineToOutputChannel("[INFO] Git operation started - syncing paused");
+        }
+    }
+
+    public static endGitOperation(): void {
+        Extension.gitOperationCount--;
+        if (Extension.gitOperationCount <= 0) {
+            Extension.gitOperationCount = 0;
+            Extension.isGitOperationInProgress = false;
+            Extension.appendLineToOutputChannel("[INFO] Git operation completed - syncing resumed");
+        }
     }
 
     public static isLikeFile(uri: vscode.Uri): Promise<boolean> {
@@ -90,11 +159,17 @@ export class Extension {
         const relativePath = vscode.workspace.asRelativePath(uri.path);
 
         if (uri.scheme === "git") {
-            Extension.appendLineToOutputChannel("File ignored (git): " + relativePath);
+            if (Date.now() - Extension.lastIgnoreLogTime >= 30000) {
+                Extension.appendLineToOutputChannel("File ignored (git): " + relativePath);
+                Extension.lastIgnoreLogTime = Date.now();
+            }
             return true;
         }
         if (uri.path === Configs.getConfigFile().path) {
-            Extension.appendLineToOutputChannel("File ignored (config file)");
+            if (Date.now() - Extension.lastIgnoreLogTime >= 30000) {
+                Extension.appendLineToOutputChannel("File ignored (config file)");
+                Extension.lastIgnoreLogTime = Date.now();
+            }
             return true;
         }
         if (micromatch.isMatch(relativePath, Configs.getWorkspaceConfigs(uri).ignore)) {
@@ -106,20 +181,78 @@ export class Extension {
         }
         if (Configs.getWorkspaceConfigs(uri).include.length > 0) {
             if (micromatch.isMatch(relativePath, Configs.getWorkspaceConfigs(uri).include) === false) {
-                Extension.appendLineToOutputChannel("File/folder not included (include option): " + relativePath);
+                if (Date.now() - Extension.lastIgnoreLogTime >= 30000) {
+                    Extension.appendLineToOutputChannel("File/folder not included (include option): " + relativePath);
+                    Extension.lastIgnoreLogTime = Date.now();
+                }
                 return true;
             }
         }
         if (Configs.getWorkspaceConfigs(uri).checkGitignore) {
             if (fs.existsSync(Configs.getGitignoreFile().path)) {
                 if (parser.compile(fs.readFileSync(Configs.getGitignoreFile().path).toString()).denies(relativePath)) {
-                    Extension.appendLineToOutputChannel("File ignored (.gitignore): " + relativePath);
+                    if (Date.now() - Extension.lastIgnoreLogTime >= 30000) {
+                        Extension.appendLineToOutputChannel("File ignored (.gitignore): " + relativePath);
+                        Extension.lastIgnoreLogTime = Date.now();
+                    }
                     return true;
                 }
             }
         }
         return false;
     }
+}
+
+function setupGitMonitoring() {
+    if (!Configs.getConfigs().pauseDuringGitOperations) {
+        return;
+    }
+
+    const gitExtension = vscode.extensions.getExtension<GitExtension>("vscode.git");
+    if (!gitExtension) {
+        Extension.appendLineToOutputChannel("[INFO] Git extension not found - git operation monitoring disabled");
+        return;
+    }
+
+    const git = gitExtension.exports.getAPI(1);
+
+    // Monitor all repositories
+    git.repositories.forEach((repository) => {
+        monitorRepository(repository);
+    });
+
+    // Monitor new repositories
+    git.onDidOpenRepository((repository) => {
+        monitorRepository(repository);
+    });
+
+    Extension.appendLineToOutputChannel("[INFO] Git operation monitoring enabled");
+}
+
+function monitorRepository(repository: any) {
+    let currentBranch = repository.state.HEAD?.name;
+
+    // Monitor repository state changes to detect branch changes
+    repository.state.onDidChange(() => {
+        const state = repository.state;
+        const newBranch = state.HEAD?.name;
+
+        // Detect if branch changed
+        if (currentBranch !== newBranch) {
+            Extension.appendLineToOutputChannel(`[INFO] Branch change detected: ${currentBranch} -> ${newBranch}`);
+            Extension.startGitOperation();
+
+            // Update current branch
+            currentBranch = newBranch;
+
+            // Add delay to ensure all file changes from branch switch are processed
+            setTimeout(() => {
+                Extension.endGitOperation();
+            }, 2000);
+        }
+    });
+
+    Extension.appendLineToOutputChannel("[INFO] Monitoring git repository: " + repository.rootUri.fsPath);
 }
 
 // this method is called when your extension is activated
@@ -140,11 +273,15 @@ export function activate(context: vscode.ExtensionContext) {
             }
         });
 
+        // Set up git operation monitoring
+        setupGitMonitoring();
+
         if (Configs.getConfigs().enableStatusBarItem) {
             Extension.statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right);
-            Extension.statusBarItem.text = "$(sync) PRO Deployer";
-            Extension.statusBarItem.command = "pro-deployer.show-output-channel";
+            Extension.statusBarItem.command = "pro-deployer.toggle-sync";
+            Extension.statusBarItem.tooltip = "Click to toggle syncing on/off";
             Extension.statusBarItem.show();
+            Extension.updateStatusBarItem();
         }
 
         let statusBarCheckTimer: NodeJS.Timeout | undefined = undefined;
@@ -152,7 +289,12 @@ export function activate(context: vscode.ExtensionContext) {
         Targets.getItems().forEach((target) => {
             target.getQueue().on("start", () => {
                 if (Configs.getConfigs().enableStatusBarItem) {
-                    Extension.statusBarItem!.text = "$(sync~spin) PRO Deployer";
+                    const icon = Extension.isSyncEnabled() ? "$(sync~spin)" : "$(debug-pause)";
+                    const activeTargets = Targets.getActive();
+                    const targetNames = activeTargets.length > 0
+                        ? ` (${activeTargets.map(t => t.getName()).join(", ")})`
+                        : "";
+                    Extension.statusBarItem!.text = `${icon} PRO Deployer+${targetNames}`;
 
                     if (!statusBarCheckTimer) {
                         statusBarCheckTimer = setInterval(() => {
@@ -162,7 +304,7 @@ export function activate(context: vscode.ExtensionContext) {
                             });
                             if (allPendingTasks > 1) {
                                 Extension.statusBarItem!.text =
-                                    "$(sync~spin) PRO Deployer: " + (allPendingTasks + 1) + "...";
+                                    "$(sync~spin) PRO Deployer+: " + (allPendingTasks + 1) + "...";
                                 Extension.statusBarItem!.tooltip = tooltipText;
                             }
                         }, 300);
@@ -224,8 +366,13 @@ export function activate(context: vscode.ExtensionContext) {
                     });
 
                     if (allPendingTasks === 0) {
-                        Extension.statusBarItem!.text = "$(sync) PRO Deployer";
-                        Extension.statusBarItem!.tooltip = "";
+                        const icon = Extension.isSyncEnabled() ? "$(sync)" : "$(debug-pause)";
+                        const activeTargets = Targets.getActive();
+                        const targetNames = activeTargets.length > 0
+                            ? ` (${activeTargets.map(t => t.getName()).join(", ")})`
+                            : "";
+                        Extension.statusBarItem!.text = `${icon} PRO Deployer+${targetNames}`;
+                        Extension.statusBarItem!.tooltip = "Click to toggle syncing on/off";
                         Extension.statusBarItem!.backgroundColor = undefined;
                         if (statusBarCheckTimer) {
                             clearInterval(statusBarCheckTimer);
@@ -276,7 +423,11 @@ export function activate(context: vscode.ExtensionContext) {
 
     fileWatcher.onDidCreate((uri) => {
         // console.log("onDidCreate", uri);
-        if (Configs.getWorkspaceConfigs(uri).uploadOnSave === false) {
+        if (!Extension.isSyncEnabled() || Configs.getConfigs().uploadOnSave === false) {
+            return;
+        }
+        if (Configs.getWorkspaceConfigs(uri).pauseDuringGitOperations && Extension.isGitOperationActive()) {
+            Extension.appendLineToOutputChannel("[INFO] Skipping upload - git operation in progress: " + vscode.workspace.asRelativePath(uri.path));
             return;
         }
         if (Extension.isUriIgnored(uri)) {
@@ -304,7 +455,11 @@ export function activate(context: vscode.ExtensionContext) {
     });
     fileWatcher.onDidChange((uri) => {
         // console.log("onDidChange", uri);
-        if (Configs.getWorkspaceConfigs(uri).uploadOnSave === false) {
+        if (!Extension.isSyncEnabled() || Configs.getConfigs().uploadOnSave === false) {
+            return;
+        }
+        if (Configs.getWorkspaceConfigs(uri).pauseDuringGitOperations && Extension.isGitOperationActive()) {
+            Extension.appendLineToOutputChannel("[INFO] Skipping upload - git operation in progress: " + vscode.workspace.asRelativePath(uri.path));
             return;
         }
         if (Extension.isUriIgnored(uri)) {
@@ -332,7 +487,11 @@ export function activate(context: vscode.ExtensionContext) {
     });
     fileWatcher.onDidDelete((uri) => {
         // console.log("onDidDelete", uri);
-        if (Configs.getWorkspaceConfigs(uri).autoDelete === false) {
+        if (!Extension.isSyncEnabled() || Configs.getConfigs().autoDelete === false) {
+            return;
+        }
+        if (Configs.getWorkspaceConfigs(uri).pauseDuringGitOperations && Extension.isGitOperationActive()) {
+            Extension.appendLineToOutputChannel("[INFO] Skipping delete - git operation in progress: " + vscode.workspace.asRelativePath(uri.path));
             return;
         }
         if (Extension.isUriIgnored(uri)) {
@@ -366,6 +525,13 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.commands.registerCommand("pro-deployer.generate-config-file", () => {
             Configs.generateConfigFile();
+        })
+    );
+    context.subscriptions.push(
+        vscode.commands.registerCommand("pro-deployer.toggle-sync", () => {
+            Extension.toggleSync();
+            const status = Extension.isSyncEnabled() ? "enabled" : "disabled";
+            vscode.window.showInformationMessage(`PRO Deployer+ syncing ${status}`);
         })
     );
     context.subscriptions.push(

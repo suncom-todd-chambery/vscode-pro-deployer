@@ -8,6 +8,8 @@ export interface ConfigsInterface {
     uploadOnSave?: boolean;
     checkGitignore?: boolean;
     concurrency?: number;
+    reconnectOnTimeout?: boolean;
+    pauseDuringGitOperations?: boolean;
     activeTargets?: string[];
     targets?: TargetOptionsInterface[];
     ignore: string[];
