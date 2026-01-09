@@ -15,7 +15,7 @@ export class Extension {
     public static statusBarItem: vscode.StatusBarItem | null;
     private static lastErrorMessageTime: number = 0;
     private static lastIgnoreLogTime: number = 0;
-    private static syncEnabled: boolean = true;
+    private static syncEnabled: boolean = false;
     private static isGitOperationInProgress: boolean = false;
     private static gitOperationCount: number = 0;
 
