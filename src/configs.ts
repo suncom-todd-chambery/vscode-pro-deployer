@@ -1,3 +1,4 @@
+import * as jsonc from "jsonc-parser";
 import { TextEncoder } from "util";
 import * as vscode from "vscode";
 import { Extension } from "./extension";
@@ -8,6 +9,7 @@ export class Configs {
         enableStatusBarItem: true,
         enableQuickPick: true,
         uploadOnSave: true,
+        ignoreSourceParentPaths: false,
         autoDelete: true,
         checkGitignore: false,
         reconnectOnTimeout: true,
@@ -48,6 +50,7 @@ export class Configs {
         enableQuickPick: true,
         autoDelete: true,
         uploadOnSave: true,
+        ignoreSourceParentPaths: false,
         checkGitignore: false,
         concurrency: 5,
         reconnectOnTimeout: true,
@@ -156,7 +159,12 @@ export class Configs {
 
                 let fileConfigs = {} as ConfigsInterface;
                 try {
-                    fileConfigs = JSON.parse(value.toString());
+                    const errors: jsonc.ParseError[] = [];
+                    fileConfigs = jsonc.parse(value.toString(), errors);
+                    if (errors.length > 0) {
+                        Extension.showErrorMessage("Can't parse config file. Check config syntax.");
+                        return;
+                    }
                 } catch (error) {
                     Extension.showErrorMessage("Can't parse config file. Check config syntax.");
                     return;
@@ -190,7 +198,12 @@ export class Configs {
 
                 let fileConfigs = {} as ConfigsInterface;
                 try {
-                    fileConfigs = JSON.parse(e.getText());
+                    const errors: jsonc.ParseError[] = [];
+                    fileConfigs = jsonc.parse(e.getText(), errors);
+                    if (errors.length > 0) {
+                        Extension.showErrorMessage("Can't parse config file. Check config syntax.");
+                        return;
+                    }
                 } catch (error) {
                     Extension.showErrorMessage("Can't parse config file. Check config syntax.");
                     return;
@@ -222,7 +235,12 @@ export class Configs {
 
                         let fileConfigs = {} as ConfigsInterface;
                         try {
-                            fileConfigs = JSON.parse(value.toString());
+                            const errors: jsonc.ParseError[] = [];
+                            fileConfigs = jsonc.parse(value.toString(), errors);
+                            if (errors.length > 0) {
+                                Extension.showErrorMessage("Can't parse config file. Check config syntax.");
+                                return;
+                            }
                         } catch (error) {
                             Extension.showErrorMessage("Can't parse config file. Check config syntax.");
                             return;

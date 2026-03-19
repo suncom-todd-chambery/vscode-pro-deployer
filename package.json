@@ -2,19 +2,29 @@
     "name": "pro-deployer",
     "displayName": "PRO Deployer+ - SFTP/FTP deployer",
     "description": "PRO Deployer - Simple and powerful SFTP/FTP deployer",
-    "version": "3.1.1",
+    "version": "4.0.1",
     "engines": {
         "vscode": "^1.82.0"
     },
+    "authors": [
+        {
+            "name": "Heminei",
+            "email": "heminei@example.com"
+        },
+        {
+            "name": "Todd Chambery",
+            "email": "todd.chambery@gmail.com"
+        }
+    ],
     "publisher": "heminei",
     "categories": [
         "Other"
     ],
     "bugs": {
-        "url": "https://github.com/heminei/vscode-pro-deployer/issues"
+        "url": "https://github.com/suncom-todd-chambery/vscode-pro-deployer/issues"
     },
     "repository": {
-        "url": "https://github.com/heminei/vscode-pro-deployer"
+        "url": "https://github.com/suncom-todd-chambery/vscode-pro-deployer"
     },
     "keywords": [
         "ftp",
@@ -153,6 +163,7 @@
     "dependencies": {
         "ftp": "^0.3.10",
         "gitignore-parser": "^0.0.2",
+        "jsonc-parser": "^3.3.1",
         "micromatch": "^4.0.5",
         "path": "^0.12.7",
         "ssh2": "0.8.9"

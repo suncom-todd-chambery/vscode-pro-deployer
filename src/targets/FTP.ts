@@ -119,8 +119,12 @@ export class FTP extends Target implements TargetInterface {
             });
         }
     }
-    upload(uri: vscode.Uri, attempts: number = 1): Promise<vscode.Uri> {
-        const relativePath = Targets.getRelativePath(this.options, uri);
+    upload(uri: vscode.Uri, sourceUri?: vscode.Uri, attempts: number = 1): Promise<vscode.Uri> {
+        const relativePath = Targets.getRelativePath(
+            this.options,
+            uri,
+            Configs.getWorkspaceConfigs(uri).ignoreSourceParentPaths ? sourceUri : undefined
+        );
 
         return new Promise<vscode.Uri>((resolve, reject) => {
             if (!this.isConnected) {
@@ -131,6 +135,7 @@ export class FTP extends Target implements TargetInterface {
             const job = <QueueTask>((cb) => {
                 if (!this.client) {
                     Extension.appendLineToOutputChannel("[ERROR][FTP] FTP client missing");
+                    cb("FTP client missing");
                     reject("FTP client missing");
                     return;
                 }
@@ -145,11 +150,20 @@ export class FTP extends Target implements TargetInterface {
                     if (attempts < 3) {
                         this.queue.stop();
                         this.destroy(true);
+                        Extension.appendLineToOutputChannel(
+                            `[INFO][FTP] Reconnect requested for upload retry (next attempt ${attempts + 1}).`
+                        );
 
                         this.connect(() => {
+                            Extension.appendLineToOutputChannel(
+                                `[INFO][FTP] Reconnected. Re-queue upload for: ${relativePath} (attempt ${attempts + 1}).`
+                            );
                             this.queue.start();
-                            this.upload(uri, attempts + 1).then(resolve, reject);
+                            this.upload(uri, sourceUri, attempts + 1).then(resolve, reject);
                         }, (err: any) => {
+                            Extension.appendLineToOutputChannel(
+                                `[ERROR][FTP] Reconnect failed during upload retry: ${err}`
+                            );
                             this.queue.start();
                             reject("Connection failed during retry: " + err);
                         });
@@ -181,7 +195,7 @@ export class FTP extends Target implements TargetInterface {
                         this.mkdir(dir).then(
                             () => {
                                 // Retry upload recursively to ensure timeout logic applies
-                                this.upload(uri, attempts).then(resolve, reject);
+                                this.upload(uri, sourceUri, attempts).then(resolve, reject);
                                 cb();
                             },
                             (reason) => {
@@ -458,8 +472,11 @@ export class FTP extends Target implements TargetInterface {
             clearInterval(this.idleCheckInterval);
             this.idleCheckInterval = null;
         }
+        this.isConnected = false;
+        this.isConnecting = false;
         if (this.client) {
             this.client.destroy();
+            this.client = null;
         }
         if (!keepQueue) {
             this.queue.end();

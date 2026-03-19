@@ -6,6 +6,7 @@ export interface ConfigsInterface {
     enableQuickPick?: boolean;
     autoDelete?: boolean;
     uploadOnSave?: boolean;
+    ignoreSourceParentPaths?: boolean;
     checkGitignore?: boolean;
     concurrency?: number;
     reconnectOnTimeout?: boolean;
@@ -32,7 +33,7 @@ export interface TargetOptionsInterface {
 
 export interface TargetInterface {
     connect(cb: Function, error?: Function | undefined): void;
-    upload(uri: vscode.Uri): Promise<vscode.Uri>;
+    upload(uri: vscode.Uri, sourceUri?: vscode.Uri): Promise<vscode.Uri>;
     download(uri: vscode.Uri, destination?: vscode.Uri): Promise<vscode.Uri>;
     downloadDir(uri: vscode.Uri): Promise<vscode.Uri>;
     delete(uri: vscode.Uri): Promise<vscode.Uri>;

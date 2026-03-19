@@ -8,6 +8,47 @@ import fs = require("fs");
 import micromatch = require("micromatch");
 import parser = require("gitignore-parser");
 
+function getParentUri(uri: vscode.Uri): vscode.Uri {
+    const lastSlashIndex = uri.path.lastIndexOf("/");
+    const parentPath = lastSlashIndex > 0 ? uri.path.substring(0, lastSlashIndex) : uri.path;
+
+    return uri.with({ path: parentPath });
+}
+
+function getIncludeSourceUri(uri: vscode.Uri): vscode.Uri {
+    const workspaceFolder = vscode.workspace.getWorkspaceFolder(uri);
+    if (workspaceFolder) {
+        const relativePath = vscode.workspace.asRelativePath(uri, false);
+        const includes = Configs.getWorkspaceConfigs(uri).include ?? [];
+
+        for (const pattern of includes) {
+            // Extract the static path segments before the first glob character
+            const segments = pattern.split("/");
+            const staticSegments: string[] = [];
+            for (const seg of segments) {
+                if (/[*?{[]/.test(seg)) {
+                    break;
+                }
+                staticSegments.push(seg);
+            }
+            const base = staticSegments.join("/");
+            if (base && relativePath.startsWith(base + "/")) {
+                return vscode.Uri.joinPath(workspaceFolder.uri, base);
+            }
+        }
+    }
+
+    return getParentUri(uri);
+}
+
+function getUploadSourceUri(uri: vscode.Uri, sourceUri?: vscode.Uri): vscode.Uri | undefined {
+    if (!Configs.getWorkspaceConfigs(uri).ignoreSourceParentPaths) {
+        return undefined;
+    }
+
+    return sourceUri ?? getIncludeSourceUri(uri);
+}
+
 export class Extension {
     public static mode = process.env.APP_MODE ?? "prod";
     public static extensionContext: vscode.ExtensionContext;
@@ -20,7 +61,7 @@ export class Extension {
     private static gitOperationCount: number = 0;
 
     public static init() {
-        Extension.outputChannel = vscode.window.createOutputChannel("PRO Deployer");
+        Extension.outputChannel = vscode.window.createOutputChannel("PRO Deployer+");
         if (this.mode === "dev") {
             Extension.outputChannel.show(true);
         }
@@ -437,15 +478,15 @@ export function activate(context: vscode.ExtensionContext) {
             target.connect(() => {
                 Extension.isLikeFile(uri).then((isFile) => {
                     if (isFile) {
-                        target.upload(uri);
+                        target.upload(uri, getUploadSourceUri(uri));
                     } else {
                         const includePattern = new vscode.RelativePattern(
                             target.getWorkspaceFolder(),
                             vscode.workspace.asRelativePath(uri, false) + "/**/*"
                         );
                         vscode.workspace.findFiles(includePattern).then((files) => {
-                            files.forEach((uri) => {
-                                target.upload(uri);
+                            files.forEach((fileUri) => {
+                                target.upload(fileUri, getUploadSourceUri(fileUri, uri));
                             });
                         });
                     }
@@ -469,15 +510,15 @@ export function activate(context: vscode.ExtensionContext) {
             target.connect(() => {
                 Extension.isLikeFile(uri).then((isFile) => {
                     if (isFile) {
-                        target.upload(uri);
+                        target.upload(uri, getUploadSourceUri(uri));
                     } else {
                         const includePattern = new vscode.RelativePattern(
                             target.getWorkspaceFolder(),
                             vscode.workspace.asRelativePath(uri, false) + "/**/*"
                         );
                         vscode.workspace.findFiles(includePattern).then((files) => {
-                            files.forEach((uri) => {
-                                target.upload(uri);
+                            files.forEach((fileUri) => {
+                                target.upload(fileUri, getUploadSourceUri(fileUri, uri));
                             });
                         });
                     }
@@ -613,15 +654,15 @@ export function activate(context: vscode.ExtensionContext) {
                     URIs.forEach((uri) => {
                         Extension.isLikeFile(uri).then((isFile) => {
                             if (isFile) {
-                                target.upload(uri);
+                                target.upload(uri, getUploadSourceUri(uri));
                             } else {
                                 const includePattern = new vscode.RelativePattern(
                                     target.getWorkspaceFolder(),
                                     vscode.workspace.asRelativePath(uri, false) + "/**/*"
                                 );
                                 vscode.workspace.findFiles(includePattern).then((files) => {
-                                    files.forEach((uri) => {
-                                        target.upload(uri);
+                                    files.forEach((fileUri) => {
+                                        target.upload(fileUri, getUploadSourceUri(fileUri, uri));
                                     });
                                 });
                             }
@@ -682,15 +723,15 @@ export function activate(context: vscode.ExtensionContext) {
                     URIs.forEach((uri) => {
                         Extension.isLikeFile(uri).then((isFile) => {
                             if (isFile) {
-                                target.upload(uri);
+                                target.upload(uri, getUploadSourceUri(uri));
                             } else {
                                 const includePattern = new vscode.RelativePattern(
                                     target.getWorkspaceFolder(),
                                     vscode.workspace.asRelativePath(uri, false) + "/**/*"
                                 );
                                 vscode.workspace.findFiles(includePattern).then((files) => {
-                                    files.forEach((uri) => {
-                                        target.upload(uri);
+                                    files.forEach((fileUri) => {
+                                        target.upload(fileUri, getUploadSourceUri(fileUri, uri));
                                     });
                                 });
                             }
@@ -741,7 +782,7 @@ export function activate(context: vscode.ExtensionContext) {
                             );
                             return;
                         }
-                        target.upload(uri);
+                        target.upload(uri, getUploadSourceUri(uri));
                     });
                 });
             });
@@ -797,7 +838,7 @@ export function activate(context: vscode.ExtensionContext) {
                             );
                             return;
                         }
-                        target.upload(uri);
+                        target.upload(uri, getUploadSourceUri(uri));
                     });
                 });
             });

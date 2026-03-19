@@ -1,3 +1,4 @@
+import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
 import { Queue } from "../Queue";
@@ -22,6 +23,7 @@ export class SFTP extends Target implements TargetInterface {
     private reconnectDelay: number = 2000;
     private lastUploadTime: number = 0;
     private idleCheckInterval: NodeJS.Timer | null = null;
+    private readonly UPLOAD_TIMEOUT = 60 * 1000; // 60 seconds
     private readonly IDLE_TIMEOUT = 40 * 60 * 1000; // 40 minutes
     private readonly IDLE_CHECK_FREQUENCY = 60 * 1000; // 1 minute
 
@@ -97,7 +99,7 @@ export class SFTP extends Target implements TargetInterface {
 
             let privateKey = undefined;
             try {
-                privateKey = this.options.privateKey ? require("fs").readFileSync(this.options.privateKey) : undefined;
+                privateKey = this.options.privateKey ? fs.readFileSync(this.options.privateKey) : undefined;
             } catch (err) {
                 Extension.showErrorMessage("[SFTP] Can't read private key file: " + this.options.privateKey);
                 return;
@@ -116,8 +118,12 @@ export class SFTP extends Target implements TargetInterface {
             });
         }
     }
-    upload(uri: vscode.Uri, attempts: number = 1): Promise<vscode.Uri> {
-        const relativePath = Targets.getRelativePath(this.options, uri);
+    upload(uri: vscode.Uri, sourceUri?: vscode.Uri, attempts: number = 1): Promise<vscode.Uri> {
+        const relativePath = Targets.getRelativePath(
+            this.options,
+            uri,
+            Configs.getWorkspaceConfigs(uri).ignoreSourceParentPaths ? sourceUri : undefined
+        );
         return new Promise<vscode.Uri>((resolve, reject) => {
             if (!this.isConnected) {
                 reject("Not connected");
@@ -127,25 +133,43 @@ export class SFTP extends Target implements TargetInterface {
             const job = <QueueTask>((cb) => {
                 if (!this.sftp) {
                     Extension.appendLineToOutputChannel("[ERROR][SFTP] SFTP client missing");
+                    cb("SFTP client missing");
                     reject("SFTP client missing");
                     return;
                 }
 
+                let uploadReadStream: fs.ReadStream | null = null;
+                let uploadWriteStream: any = null;
                 let isTimeout = false;
                 const timer = setTimeout(() => {
                     isTimeout = true;
+                    if (uploadReadStream) {
+                        uploadReadStream.destroy();
+                    }
+                    if (uploadWriteStream && typeof uploadWriteStream.destroy === "function") {
+                        uploadWriteStream.destroy();
+                    }
                     Extension.appendLineToOutputChannel(
-                        `[WARNING][SFTP] Upload stalled (20s). Retrying... (Attempt ${attempts})`
+                        `[WARNING][SFTP] Upload stalled (${this.UPLOAD_TIMEOUT / 1000}s). Retrying... (Attempt ${attempts})`
                     );
 
                     if (attempts < 3) {
                         this.queue.stop();
                         this.destroy(true);
+                        Extension.appendLineToOutputChannel(
+                            `[INFO][SFTP] Reconnect requested for upload retry (next attempt ${attempts + 1}).`
+                        );
 
                         this.connect(() => {
+                            Extension.appendLineToOutputChannel(
+                                `[INFO][SFTP] Reconnected. Re-queue upload for: ${relativePath} (attempt ${attempts + 1}).`
+                            );
                             this.queue.start();
-                            this.upload(uri, attempts + 1).then(resolve, reject);
+                            this.upload(uri, sourceUri, attempts + 1).then(resolve, reject);
                         }, (err: any) => {
+                            Extension.appendLineToOutputChannel(
+                                `[ERROR][SFTP] Reconnect failed during upload retry: ${err}`
+                            );
                             this.queue.start();
                             reject("Connection failed during retry: " + err);
                         });
@@ -155,56 +179,70 @@ export class SFTP extends Target implements TargetInterface {
                         reject("Upload timeout");
                         cb("Upload timeout");
                     }
-                }, 20000);
+                }, this.UPLOAD_TIMEOUT);
 
-                Extension.appendLineToOutputChannel("[INFO][SFTP] Start uploading file: " + relativePath);
-                this.sftp.fastPut(uri.fsPath, this.options.dir + relativePath, (err: any) => {
-                    if (isTimeout) {
+                const remoteRelativeDir = path.dirname(relativePath);
+                const mkdirPromise = remoteRelativeDir !== "."
+                    ? this.mkdir(this.options.dir + remoteRelativeDir)
+                    : Promise.resolve("");
+
+                mkdirPromise.then(() => {
+                    if (isTimeout) { return; }
+                    Extension.appendLineToOutputChannel("[INFO][SFTP] Start uploading file: " + relativePath);
+                    if (!this.sftp) {
+                        clearTimeout(timer);
+                        cb("SFTP client missing");
+                        reject("SFTP client missing");
                         return;
                     }
-                    clearTimeout(timer);
 
-                    if (err) {
-                        if (err.code === 2) {
-                            // No such file or directory
-                            const dir = this.options.dir + path.dirname(relativePath);
-
-                            Extension.appendLineToOutputChannel("[INFO][SFTP] Missing directory: " + dir);
-                            this.mkdir(dir).then(
-                                () => {
-                                    Extension.appendLineToOutputChannel(
-                                        "[INFO][SFTP] The directory is created: " + dir + "."
-                                    );
-                                    // Retry upload recursively to ensure timeout logic applies
-                                    this.upload(uri, attempts).then(resolve, reject);
-                                    cb();
-                                },
-                                (reason: Error) => {
-                                    cb(reason);
-                                    reject(reason);
-                                }
-                            );
+                    let isFinished = false;
+                    const finishWithError = (reason: any) => {
+                        if (isFinished || isTimeout) {
                             return;
                         }
-
+                        isFinished = true;
+                        clearTimeout(timer);
                         Extension.appendLineToOutputChannel(
-                            "[ERROR][SFTP] Can't upload file: " + uri.path + ". Error: " + err.message
+                            "[ERROR][SFTP] Can't upload file: " + uri.path + ". Error: " + reason
                         );
-                        cb(err.message);
-                        reject(err.message);
-                        return;
-                    }
+                        cb(reason);
+                        reject(reason);
+                    };
+
+                    uploadReadStream = fs.createReadStream(uri.fsPath);
+                    uploadWriteStream = this.sftp.createWriteStream(this.options.dir + relativePath);
+
+                    uploadReadStream.once("error", finishWithError);
+                    uploadWriteStream.once("error", finishWithError);
+                    uploadWriteStream.once("close", () => {
+                        if (isFinished || isTimeout) {
+                            return;
+                        }
+                        isFinished = true;
+                        clearTimeout(timer);
+                        Extension.appendLineToOutputChannel(
+                            "[INFO][SFTP] File: '" +
+                            relativePath +
+                            "' is uploaded to: '" +
+                            this.options.dir +
+                            relativePath +
+                            "'"
+                        );
+                        this.lastUploadTime = Date.now();
+                        cb();
+                        resolve(uri);
+                    });
+
+                    uploadReadStream.pipe(uploadWriteStream);
+                }, (reason: Error) => {
+                    if (isTimeout) { return; }
+                    clearTimeout(timer);
                     Extension.appendLineToOutputChannel(
-                        "[INFO][SFTP] File: '" +
-                        relativePath +
-                        "' is uploaded to: '" +
-                        this.options.dir +
-                        relativePath +
-                        "'"
+                        "[ERROR][SFTP] Can't create remote dir for: " + relativePath + ". Error: " + reason
                     );
-                    this.lastUploadTime = Date.now();
-                    cb();
-                    resolve(uri);
+                    cb(reason);
+                    reject(reason);
                 });
             });
             job.uri = uri;
@@ -518,9 +556,12 @@ export class SFTP extends Target implements TargetInterface {
             clearInterval(this.idleCheckInterval);
             this.idleCheckInterval = null;
         }
+        this.isConnected = false;
+        this.isConnecting = false;
+        this.sftp = null;
         if (this.client) {
             this.client.destroy();
-            this.sftp = null;
+            this.client = null;
         }
         if (!keepQueue) {
             this.queue.end();

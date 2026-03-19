@@ -47,6 +47,7 @@ Config file location: `${workspaceFolder}/.vscode/pro-deployer.json`
     "enableStatusBarItem": true, //enable extension status bar item
     "enableQuickPick": true, //enable quick pick when upload/error occurs
     "uploadOnSave": true, //on file change will be uploaded to active targets
+    "ignoreSourceParentPaths": false, //upload descendants without creating the selected/watched directory or its parent paths
     "autoDelete": true, //on file delete will be deleted to active targets
     "checkGitignore": false, //skip files that are ignored in .gitignore
     "activeTargets": [
