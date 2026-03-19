@@ -20,6 +20,10 @@ export class SFTP extends Target implements TargetInterface {
     private reconnectAttempts: number = 0;
     private maxReconnectAttempts: number = 3;
     private reconnectDelay: number = 2000;
+    private lastUploadTime: number = 0;
+    private idleCheckInterval: NodeJS.Timer | null = null;
+    private readonly IDLE_TIMEOUT = 40 * 60 * 1000; // 40 minutes
+    private readonly IDLE_CHECK_FREQUENCY = 60 * 1000; // 1 minute
 
     constructor(private options: TargetOptionsInterface, workspaceFolder: vscode.WorkspaceFolder) {
         super(workspaceFolder);
@@ -53,6 +57,8 @@ export class SFTP extends Target implements TargetInterface {
 
         this.once("ready", () => {
             cb();
+            this.lastUploadTime = Date.now();
+            this.startIdleCheck();
             Extension.appendLineToOutputChannel("[INFO][SFTP] Connected successfully to: " + this.options.host);
         });
         this.once("error", (error) => {
@@ -110,7 +116,7 @@ export class SFTP extends Target implements TargetInterface {
             });
         }
     }
-    upload(uri: vscode.Uri): Promise<vscode.Uri> {
+    upload(uri: vscode.Uri, attempts: number = 1): Promise<vscode.Uri> {
         const relativePath = Targets.getRelativePath(this.options, uri);
         return new Promise<vscode.Uri>((resolve, reject) => {
             if (!this.isConnected) {
@@ -124,8 +130,40 @@ export class SFTP extends Target implements TargetInterface {
                     reject("SFTP client missing");
                     return;
                 }
+
+                let isTimeout = false;
+                const timer = setTimeout(() => {
+                    isTimeout = true;
+                    Extension.appendLineToOutputChannel(
+                        `[WARNING][SFTP] Upload stalled (20s). Retrying... (Attempt ${attempts})`
+                    );
+
+                    if (attempts < 3) {
+                        this.queue.stop();
+                        this.destroy(true);
+
+                        this.connect(() => {
+                            this.queue.start();
+                            this.upload(uri, attempts + 1).then(resolve, reject);
+                        }, (err: any) => {
+                            this.queue.start();
+                            reject("Connection failed during retry: " + err);
+                        });
+                        cb();
+                    } else {
+                        Extension.appendLineToOutputChannel(`[ERROR][SFTP] Upload timeout after 3 attempts.`);
+                        reject("Upload timeout");
+                        cb("Upload timeout");
+                    }
+                }, 20000);
+
                 Extension.appendLineToOutputChannel("[INFO][SFTP] Start uploading file: " + relativePath);
                 this.sftp.fastPut(uri.fsPath, this.options.dir + relativePath, (err: any) => {
+                    if (isTimeout) {
+                        return;
+                    }
+                    clearTimeout(timer);
+
                     if (err) {
                         if (err.code === 2) {
                             // No such file or directory
@@ -137,15 +175,9 @@ export class SFTP extends Target implements TargetInterface {
                                     Extension.appendLineToOutputChannel(
                                         "[INFO][SFTP] The directory is created: " + dir + "."
                                     );
-                                    this.sftp?.fastPut(uri.fsPath, this.options.dir + relativePath, (err: any) => {
-                                        if (err) {
-                                            cb(err);
-                                            reject(err);
-                                            return;
-                                        }
-                                        cb();
-                                        resolve(uri);
-                                    });
+                                    // Retry upload recursively to ensure timeout logic applies
+                                    this.upload(uri, attempts).then(resolve, reject);
+                                    cb();
                                 },
                                 (reason: Error) => {
                                     cb(reason);
@@ -170,6 +202,7 @@ export class SFTP extends Target implements TargetInterface {
                         relativePath +
                         "'"
                     );
+                    this.lastUploadTime = Date.now();
                     cb();
                     resolve(uri);
                 });
@@ -480,13 +513,31 @@ export class SFTP extends Target implements TargetInterface {
         return this.queue;
     }
 
-    destroy() {
+    destroy(keepQueue: boolean = false) {
+        if (this.idleCheckInterval) {
+            clearInterval(this.idleCheckInterval);
+            this.idleCheckInterval = null;
+        }
         if (this.client) {
             this.client.destroy();
             this.sftp = null;
         }
-        this.queue.end();
+        if (!keepQueue) {
+            this.queue.end();
+        }
         Extension.appendLineToOutputChannel("[INFO][SFTP] The connection is destroyed");
+    }
+
+    private startIdleCheck() {
+        if (this.idleCheckInterval) {
+            clearInterval(this.idleCheckInterval);
+        }
+        this.idleCheckInterval = setInterval(() => {
+            if (Date.now() - this.lastUploadTime > this.IDLE_TIMEOUT) {
+                Extension.appendLineToOutputChannel("[INFO][SFTP] Idle timeout detected. Reconnecting...");
+                this.reconnect();
+            }
+        }, this.IDLE_CHECK_FREQUENCY);
     }
 
     private createClient() {
@@ -559,6 +610,7 @@ export class SFTP extends Target implements TargetInterface {
 
     private reconnect(): void {
         Extension.appendLineToOutputChannel("[INFO][SFTP] Reconnecting...");
+        this.destroy(true);
         this.isConnected = false;
         this.isConnecting = false;
         this.sftp = null;

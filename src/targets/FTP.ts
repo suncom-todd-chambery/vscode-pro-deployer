@@ -19,6 +19,10 @@ export class FTP extends Target implements TargetInterface {
     private reconnectAttempts: number = 0;
     private maxReconnectAttempts: number = 3;
     private reconnectDelay: number = 2000;
+    private lastUploadTime: number = 0;
+    private idleCheckInterval: NodeJS.Timer | null = null;
+    private readonly IDLE_TIMEOUT = 40 * 60 * 1000; // 40 minutes
+    private readonly IDLE_CHECK_FREQUENCY = 60 * 1000; // 1 minute
 
     constructor(private options: TargetOptionsInterface, workspaceFolder: vscode.WorkspaceFolder) {
         super(workspaceFolder);
@@ -60,11 +64,15 @@ export class FTP extends Target implements TargetInterface {
                         return;
                     }
                     cb();
+                    this.lastUploadTime = Date.now();
+                    this.startIdleCheck();
                     Extension.appendLineToOutputChannel("[INFO][FTP] Connected successfully to: " + this.options.host);
                     Extension.appendLineToOutputChannel("[INFO][FTP] Set transfer data type to: ascii");
                 });
             } else {
                 cb();
+                this.lastUploadTime = Date.now();
+                this.startIdleCheck();
                 Extension.appendLineToOutputChannel("[INFO][FTP] Connected successfully to: " + this.options.host);
             }
         });
@@ -111,7 +119,7 @@ export class FTP extends Target implements TargetInterface {
             });
         }
     }
-    upload(uri: vscode.Uri, attempts = 1): Promise<vscode.Uri> {
+    upload(uri: vscode.Uri, attempts: number = 1): Promise<vscode.Uri> {
         const relativePath = Targets.getRelativePath(this.options, uri);
 
         return new Promise<vscode.Uri>((resolve, reject) => {
@@ -126,8 +134,40 @@ export class FTP extends Target implements TargetInterface {
                     reject("FTP client missing");
                     return;
                 }
+
+                let isTimeout = false;
+                const timer = setTimeout(() => {
+                    isTimeout = true;
+                    Extension.appendLineToOutputChannel(
+                        `[WARNING][FTP] Upload stalled (20s). Retrying... (Attempt ${attempts})`
+                    );
+
+                    if (attempts < 3) {
+                        this.queue.stop();
+                        this.destroy(true);
+
+                        this.connect(() => {
+                            this.queue.start();
+                            this.upload(uri, attempts + 1).then(resolve, reject);
+                        }, (err: any) => {
+                            this.queue.start();
+                            reject("Connection failed during retry: " + err);
+                        });
+                        cb();
+                    } else {
+                        Extension.appendLineToOutputChannel(`[ERROR][FTP] Upload timeout after 3 attempts.`);
+                        reject("Upload timeout");
+                        cb("Upload timeout");
+                    }
+                }, 20000);
+
                 Extension.appendLineToOutputChannel("[INFO][FTP] Start uploading file: " + relativePath);
                 this.client.put(uri.fsPath, this.options.dir + relativePath, (err) => {
+                    if (isTimeout) {
+                        return;
+                    }
+                    clearTimeout(timer);
+
                     if (err) {
                         // if (
                         //     err.message.indexOf("No such file") !== -1 ||
@@ -140,23 +180,9 @@ export class FTP extends Target implements TargetInterface {
                         const dir = this.options.dir + path.dirname(relativePath);
                         this.mkdir(dir).then(
                             () => {
-                                this.client?.put(uri.fsPath, this.options.dir + relativePath, (err) => {
-                                    if (err) {
-                                        cb(err);
-                                        reject(err);
-                                        return;
-                                    }
-                                    cb();
-                                    resolve(uri);
-                                    Extension.appendLineToOutputChannel(
-                                        "[INFO][FTP] File: '" +
-                                        relativePath +
-                                        "' is uploaded to: '" +
-                                        this.options.dir +
-                                        relativePath +
-                                        "'"
-                                    );
-                                });
+                                // Retry upload recursively to ensure timeout logic applies
+                                this.upload(uri, attempts).then(resolve, reject);
+                                cb();
                             },
                             (reason) => {
                                 cb(reason);
@@ -174,6 +200,7 @@ export class FTP extends Target implements TargetInterface {
                         relativePath +
                         "'"
                     );
+                    this.lastUploadTime = Date.now();
                     cb();
                     resolve(uri);
                 });
@@ -426,12 +453,30 @@ export class FTP extends Target implements TargetInterface {
         return this.queue;
     }
 
-    destroy() {
+    destroy(keepQueue: boolean = false) {
+        if (this.idleCheckInterval) {
+            clearInterval(this.idleCheckInterval);
+            this.idleCheckInterval = null;
+        }
         if (this.client) {
             this.client.destroy();
         }
-        this.queue.end();
+        if (!keepQueue) {
+            this.queue.end();
+        }
         Extension.appendLineToOutputChannel("[INFO][FTP] The connection is destroyed");
+    }
+
+    private startIdleCheck() {
+        if (this.idleCheckInterval) {
+            clearInterval(this.idleCheckInterval);
+        }
+        this.idleCheckInterval = setInterval(() => {
+            if (Date.now() - this.lastUploadTime > this.IDLE_TIMEOUT) {
+                Extension.appendLineToOutputChannel("[INFO][FTP] Idle timeout detected. Reconnecting...");
+                this.reconnect();
+            }
+        }, this.IDLE_CHECK_FREQUENCY);
     }
 
     private createClient() {
@@ -505,6 +550,7 @@ export class FTP extends Target implements TargetInterface {
 
     private reconnect(): void {
         Extension.appendLineToOutputChannel("[INFO][FTP] Reconnecting...");
+        this.destroy(true);
         this.isConnected = false;
         this.isConnecting = false;
 
