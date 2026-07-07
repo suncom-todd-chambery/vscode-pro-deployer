@@ -1,12 +1,28 @@
+import * as vscode from "vscode";
 import { Configs } from "../configs";
 import { Extension } from "../extension";
 import { FTP } from "./FTP";
-import { SFTP } from "./SFTP";
 import { TargetInterface, TargetOptionsInterface, TargetTypes } from "./Interfaces";
-import * as vscode from "vscode";
+import { SFTP } from "./SFTP";
 
 export class Targets {
     private static items: TargetInterface[] = [];
+
+    private static removeBaseDir(targetConfig: TargetOptionsInterface, relativePath: string): string {
+        let baseDir = targetConfig.baseDir ?? "/";
+
+        if (baseDir.startsWith("/") === true) {
+            baseDir = baseDir.substring(1);
+        }
+        if (baseDir.endsWith("/") === false) {
+            baseDir = baseDir + "/";
+        }
+        if (relativePath.startsWith(baseDir) === true) {
+            relativePath = relativePath.substring(baseDir.length);
+        }
+
+        return relativePath;
+    }
 
     public static add(target: TargetInterface) {
         this.items.push(target);
@@ -56,18 +72,21 @@ export class Targets {
         return null;
     }
 
-    public static getRelativePath(targetConfig: TargetOptionsInterface, uri: vscode.Uri): string {
-        let relativePath = vscode.workspace.asRelativePath(uri, false);
-        let baseDir = targetConfig.baseDir ?? "/";
+    public static getRelativePath(
+        targetConfig: TargetOptionsInterface,
+        uri: vscode.Uri,
+        sourceUri?: vscode.Uri
+    ): string {
+        let relativePath = this.removeBaseDir(targetConfig, vscode.workspace.asRelativePath(uri, false));
 
-        if (baseDir.startsWith("/") === true) {
-            baseDir = baseDir.substring(1);
-        }
-        if (baseDir.endsWith("/") === false) {
-            baseDir = baseDir + "/";
-        }
-        if (relativePath.startsWith(baseDir) === true) {
-            relativePath = relativePath.substring(baseDir.length);
+        if (sourceUri) {
+            const sourceRelativePath = this.removeBaseDir(targetConfig, vscode.workspace.asRelativePath(sourceUri, false));
+            if (sourceRelativePath.length > 0) {
+                const sourcePrefix = sourceRelativePath.endsWith("/") ? sourceRelativePath : sourceRelativePath + "/";
+                if (relativePath.startsWith(sourcePrefix) === true) {
+                    relativePath = relativePath.substring(sourcePrefix.length);
+                }
+            }
         }
 
         return relativePath;

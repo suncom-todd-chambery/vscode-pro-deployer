@@ -8,19 +8,60 @@ import fs = require("fs");
 import micromatch = require("micromatch");
 import parser = require("gitignore-parser");
 
+function getParentUri(uri: vscode.Uri): vscode.Uri {
+    const lastSlashIndex = uri.path.lastIndexOf("/");
+    const parentPath = lastSlashIndex > 0 ? uri.path.substring(0, lastSlashIndex) : uri.path;
+
+    return uri.with({ path: parentPath });
+}
+
+function getIncludeSourceUri(uri: vscode.Uri): vscode.Uri {
+    const workspaceFolder = vscode.workspace.getWorkspaceFolder(uri);
+    if (workspaceFolder) {
+        const relativePath = vscode.workspace.asRelativePath(uri, false);
+        const includes = Configs.getWorkspaceConfigs(uri).include ?? [];
+
+        for (const pattern of includes) {
+            // Extract the static path segments before the first glob character
+            const segments = pattern.split("/");
+            const staticSegments: string[] = [];
+            for (const seg of segments) {
+                if (/[*?{[]/.test(seg)) {
+                    break;
+                }
+                staticSegments.push(seg);
+            }
+            const base = staticSegments.join("/");
+            if (base && relativePath.startsWith(base + "/")) {
+                return vscode.Uri.joinPath(workspaceFolder.uri, base);
+            }
+        }
+    }
+
+    return getParentUri(uri);
+}
+
+function getUploadSourceUri(uri: vscode.Uri, sourceUri?: vscode.Uri): vscode.Uri | undefined {
+    if (!Configs.getWorkspaceConfigs(uri).ignoreSourceParentPaths) {
+        return undefined;
+    }
+
+    return sourceUri ?? getIncludeSourceUri(uri);
+}
+
 export class Extension {
     public static mode = process.env.APP_MODE ?? "prod";
     public static extensionContext: vscode.ExtensionContext;
     public static outputChannel: vscode.OutputChannel | null;
     public static statusBarItem: vscode.StatusBarItem | null;
     private static lastErrorMessageTime: number = 0;
-    private static syncEnabled: boolean = true;
-    private static lastStatusBarClickTime: number = 0;
+    private static lastIgnoreLogTime: number = 0;
+    private static syncEnabled: boolean = false;
     private static isGitOperationInProgress: boolean = false;
     private static gitOperationCount: number = 0;
 
     public static init() {
-        Extension.outputChannel = vscode.window.createOutputChannel("PRO Deployer");
+        Extension.outputChannel = vscode.window.createOutputChannel("PRO Deployer+");
         if (this.mode === "dev") {
             Extension.outputChannel.show(true);
         }
@@ -61,67 +102,21 @@ export class Extension {
     }
 
     public static handleStatusBarClick() {
-        const now = Date.now();
-        const timeSinceLastClick = now - Extension.lastStatusBarClickTime;
-        Extension.lastStatusBarClickTime = now;
-
-        // Detect double-click (within 500ms)
-        if (timeSinceLastClick < 500) {
-            vscode.commands.executeCommand("pro-deployer.select-active-targets");
-        } else {
-            Extension.toggleSync();
-            const status = Extension.isSyncEnabled() ? "enabled" : "disabled";
-            vscode.window.showInformationMessage(`PRO Deployer syncing ${status}`);
-        }
-    }
-
-    public static selectActiveTargets() {
-        const allTargets = Targets.getItems();
-        if (allTargets.length === 0) {
-            Extension.showErrorMessage("No targets configured");
-            return;
-        }
-
-        const currentActiveTargets = Configs.getConfigs().activeTargets || [];
-        const quickPickItems = allTargets.map((target) => {
-            const isActive = currentActiveTargets.indexOf(target.getName()) !== -1;
-            return {
-                label: target.getName(),
-                picked: isActive,
-            };
-        });
-
-        vscode.window.showQuickPick(quickPickItems, {
-            canPickMany: true,
-            placeHolder: "Select active targets (currently: " + currentActiveTargets.join(", ") + ")",
-        }).then((selected) => {
-            if (selected === undefined) {
-                return;
-            }
-
-            const newActiveTargets = selected.map((item) => item.label);
-            Configs.getConfigs().activeTargets = newActiveTargets;
-            Extension.extensionContext.workspaceState.update("configs", {
-                activeTargets: newActiveTargets,
-            });
-            Extension.updateStatusBarItem();
-            Extension.appendLineToOutputChannel(
-                "Active targets updated: " + (newActiveTargets.length > 0 ? newActiveTargets.join(", ") : "none")
-            );
-            vscode.window.showInformationMessage(
-                "Active targets: " + (newActiveTargets.length > 0 ? newActiveTargets.join(", ") : "none")
-            );
-        });
+        Extension.toggleSync();
+        const status = Extension.isSyncEnabled() ? "enabled" : "disabled";
+        vscode.window.showInformationMessage(`PRO Deployer syncing ${status}`);
     }
 
     public static updateStatusBarItem() {
         if (Extension.statusBarItem && Configs.getConfigs().enableStatusBarItem) {
-            const icon = Extension.syncEnabled ? "$(sync)" : "$(debug-pause)";
             const activeTargets = Targets.getActive();
             const targetNames = activeTargets.length > 0
                 ? ` (${activeTargets.map(t => t.getName()).join(", ")})`
                 : "";
-            Extension.statusBarItem.text = `${icon} PRO Deployer${targetNames}`;
+            Extension.statusBarItem.text = `PRO Deployer+${targetNames}`;
+            Extension.statusBarItem.backgroundColor = Extension.syncEnabled
+                ? new vscode.ThemeColor("statusBarItem.warningBackground")
+                : undefined;
         }
     }
 
@@ -132,25 +127,24 @@ export class Extension {
         }
     }
 
-    public static showErrorMessage(string: string) {
+    public static async showErrorMessage(string: string) {
         Extension.appendLineToOutputChannel("[ERROR][showErrorMessage] " + string);
         Extension.lastErrorMessageTime = Date.now();
-        return vscode.window.showErrorMessage("[PRO Deployer] " + string, "Show output channel").then((value) => {
-            if (value === "Show output channel") {
-                vscode.commands.executeCommand("pro-deployer.show-output-channel");
-            }
-        });
+        const value = await vscode.window.showErrorMessage("[PRO Deployer] " + string, "Show output channel");
+        if (value === "Show output channel") {
+            vscode.commands.executeCommand("pro-deployer.show-output-channel");
+        }
     }
 
 
     public static setConnectionError(hasError: boolean) {
         if (Extension.statusBarItem && Configs.getConfigs().enableStatusBarItem) {
             if (hasError) {
-                Extension.statusBarItem.text = "$(warning) PRO Deployer";
+                Extension.statusBarItem.text = "PRO Deployer+";
                 Extension.statusBarItem.backgroundColor = new vscode.ThemeColor("statusBarItem.errorBackground");
                 Extension.statusBarItem.tooltip = "Connection error - unable to reconnect";
             } else {
-                Extension.statusBarItem.text = "$(sync) PRO Deployer";
+                Extension.statusBarItem.text = "PRO Deployer+";
                 Extension.statusBarItem.backgroundColor = undefined;
                 Extension.statusBarItem.tooltip = "";
             }
@@ -208,27 +202,42 @@ export class Extension {
         const relativePath = vscode.workspace.asRelativePath(uri.path);
 
         if (uri.scheme === "git") {
-            Extension.appendLineToOutputChannel("File ignored (git): " + relativePath);
+            if (Date.now() - Extension.lastIgnoreLogTime >= 30000) {
+                Extension.appendLineToOutputChannel("File ignored (git): " + relativePath);
+                Extension.lastIgnoreLogTime = Date.now();
+            }
             return true;
         }
         if (uri.path === Configs.getConfigFile().path) {
-            Extension.appendLineToOutputChannel("File ignored (config file)");
+            if (Date.now() - Extension.lastIgnoreLogTime >= 30000) {
+                Extension.appendLineToOutputChannel("File ignored (config file)");
+                Extension.lastIgnoreLogTime = Date.now();
+            }
             return true;
         }
         if (micromatch.isMatch(relativePath, Configs.getWorkspaceConfigs(uri).ignore)) {
-            Extension.appendLineToOutputChannel("File/folder ignored (ignore option): " + relativePath);
+            if (Date.now() - Extension.lastIgnoreLogTime >= 30000) {
+                Extension.appendLineToOutputChannel("File/folder ignored (ignore option): " + relativePath);
+                Extension.lastIgnoreLogTime = Date.now();
+            }
             return true;
         }
         if (Configs.getWorkspaceConfigs(uri).include.length > 0) {
             if (micromatch.isMatch(relativePath, Configs.getWorkspaceConfigs(uri).include) === false) {
-                Extension.appendLineToOutputChannel("File/folder not included (include option): " + relativePath);
+                if (Date.now() - Extension.lastIgnoreLogTime >= 30000) {
+                    Extension.appendLineToOutputChannel("File/folder not included (include option): " + relativePath);
+                    Extension.lastIgnoreLogTime = Date.now();
+                }
                 return true;
             }
         }
         if (Configs.getWorkspaceConfigs(uri).checkGitignore) {
             if (fs.existsSync(Configs.getGitignoreFile().path)) {
                 if (parser.compile(fs.readFileSync(Configs.getGitignoreFile().path).toString()).denies(relativePath)) {
-                    Extension.appendLineToOutputChannel("File ignored (.gitignore): " + relativePath);
+                    if (Date.now() - Extension.lastIgnoreLogTime >= 30000) {
+                        Extension.appendLineToOutputChannel("File ignored (.gitignore): " + relativePath);
+                        Extension.lastIgnoreLogTime = Date.now();
+                    }
                     return true;
                 }
             }
@@ -312,8 +321,8 @@ export function activate(context: vscode.ExtensionContext) {
 
         if (Configs.getConfigs().enableStatusBarItem) {
             Extension.statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right);
-            Extension.statusBarItem.command = "pro-deployer.handle-status-bar-click";
-            Extension.statusBarItem.tooltip = "Click to toggle syncing on/off | Double-click to select active targets";
+            Extension.statusBarItem.command = "pro-deployer.toggle-sync";
+            Extension.statusBarItem.tooltip = "Click to toggle syncing on/off";
             Extension.statusBarItem.show();
             Extension.updateStatusBarItem();
         }
@@ -323,12 +332,11 @@ export function activate(context: vscode.ExtensionContext) {
         Targets.getItems().forEach((target) => {
             target.getQueue().on("start", () => {
                 if (Configs.getConfigs().enableStatusBarItem) {
-                    const icon = Extension.isSyncEnabled() ? "$(sync~spin)" : "$(debug-pause)";
                     const activeTargets = Targets.getActive();
                     const targetNames = activeTargets.length > 0
                         ? ` (${activeTargets.map(t => t.getName()).join(", ")})`
                         : "";
-                    Extension.statusBarItem!.text = `${icon} PRO Deployer${targetNames}`;
+                    Extension.statusBarItem!.text = `PRO Deployer+${targetNames}`;
 
                     if (!statusBarCheckTimer) {
                         statusBarCheckTimer = setInterval(() => {
@@ -338,7 +346,7 @@ export function activate(context: vscode.ExtensionContext) {
                             });
                             if (allPendingTasks > 1) {
                                 Extension.statusBarItem!.text =
-                                    "$(sync~spin) PRO Deployer: " + (allPendingTasks + 1) + "...";
+                                    "PRO Deployer+: " + (allPendingTasks + 1) + "...";
                                 Extension.statusBarItem!.tooltip = tooltipText;
                             }
                         }, 300);
@@ -400,14 +408,15 @@ export function activate(context: vscode.ExtensionContext) {
                     });
 
                     if (allPendingTasks === 0) {
-                        const icon = Extension.isSyncEnabled() ? "$(sync)" : "$(debug-pause)";
                         const activeTargets = Targets.getActive();
                         const targetNames = activeTargets.length > 0
                             ? ` (${activeTargets.map(t => t.getName()).join(", ")})`
                             : "";
-                        Extension.statusBarItem!.text = `${icon} PRO Deployer${targetNames}`;
+                        Extension.statusBarItem!.text = `PRO Deployer+${targetNames}`;
                         Extension.statusBarItem!.tooltip = "Click to toggle syncing on/off";
-                        Extension.statusBarItem!.backgroundColor = undefined;
+                        Extension.statusBarItem!.backgroundColor = Extension.isSyncEnabled()
+                            ? new vscode.ThemeColor("statusBarItem.warningBackground")
+                            : undefined;
                         if (statusBarCheckTimer) {
                             clearInterval(statusBarCheckTimer);
                             statusBarCheckTimer = undefined;
@@ -471,15 +480,15 @@ export function activate(context: vscode.ExtensionContext) {
             target.connect(() => {
                 Extension.isLikeFile(uri).then((isFile) => {
                     if (isFile) {
-                        target.upload(uri);
+                        target.upload(uri, getUploadSourceUri(uri));
                     } else {
                         const includePattern = new vscode.RelativePattern(
                             target.getWorkspaceFolder(),
                             vscode.workspace.asRelativePath(uri, false) + "/**/*"
                         );
                         vscode.workspace.findFiles(includePattern).then((files) => {
-                            files.forEach((uri) => {
-                                target.upload(uri);
+                            files.forEach((fileUri) => {
+                                target.upload(fileUri, getUploadSourceUri(fileUri, uri));
                             });
                         });
                     }
@@ -503,15 +512,15 @@ export function activate(context: vscode.ExtensionContext) {
             target.connect(() => {
                 Extension.isLikeFile(uri).then((isFile) => {
                     if (isFile) {
-                        target.upload(uri);
+                        target.upload(uri, getUploadSourceUri(uri));
                     } else {
                         const includePattern = new vscode.RelativePattern(
                             target.getWorkspaceFolder(),
                             vscode.workspace.asRelativePath(uri, false) + "/**/*"
                         );
                         vscode.workspace.findFiles(includePattern).then((files) => {
-                            files.forEach((uri) => {
-                                target.upload(uri);
+                            files.forEach((fileUri) => {
+                                target.upload(fileUri, getUploadSourceUri(fileUri, uri));
                             });
                         });
                     }
@@ -565,17 +574,7 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand("pro-deployer.toggle-sync", () => {
             Extension.toggleSync();
             const status = Extension.isSyncEnabled() ? "enabled" : "disabled";
-            vscode.window.showInformationMessage(`PRO Deployer syncing ${status}`);
-        })
-    );
-    context.subscriptions.push(
-        vscode.commands.registerCommand("pro-deployer.handle-status-bar-click", () => {
-            Extension.handleStatusBarClick();
-        })
-    );
-    context.subscriptions.push(
-        vscode.commands.registerCommand("pro-deployer.select-active-targets", () => {
-            Extension.selectActiveTargets();
+            vscode.window.showInformationMessage(`PRO Deployer+ syncing ${status}`);
         })
     );
     context.subscriptions.push(
@@ -657,15 +656,15 @@ export function activate(context: vscode.ExtensionContext) {
                     URIs.forEach((uri) => {
                         Extension.isLikeFile(uri).then((isFile) => {
                             if (isFile) {
-                                target.upload(uri);
+                                target.upload(uri, getUploadSourceUri(uri));
                             } else {
                                 const includePattern = new vscode.RelativePattern(
                                     target.getWorkspaceFolder(),
                                     vscode.workspace.asRelativePath(uri, false) + "/**/*"
                                 );
                                 vscode.workspace.findFiles(includePattern).then((files) => {
-                                    files.forEach((uri) => {
-                                        target.upload(uri);
+                                    files.forEach((fileUri) => {
+                                        target.upload(fileUri, getUploadSourceUri(fileUri, uri));
                                     });
                                 });
                             }
@@ -726,15 +725,15 @@ export function activate(context: vscode.ExtensionContext) {
                     URIs.forEach((uri) => {
                         Extension.isLikeFile(uri).then((isFile) => {
                             if (isFile) {
-                                target.upload(uri);
+                                target.upload(uri, getUploadSourceUri(uri));
                             } else {
                                 const includePattern = new vscode.RelativePattern(
                                     target.getWorkspaceFolder(),
                                     vscode.workspace.asRelativePath(uri, false) + "/**/*"
                                 );
                                 vscode.workspace.findFiles(includePattern).then((files) => {
-                                    files.forEach((uri) => {
-                                        target.upload(uri);
+                                    files.forEach((fileUri) => {
+                                        target.upload(fileUri, getUploadSourceUri(fileUri, uri));
                                     });
                                 });
                             }
@@ -785,7 +784,7 @@ export function activate(context: vscode.ExtensionContext) {
                             );
                             return;
                         }
-                        target.upload(uri);
+                        target.upload(uri, getUploadSourceUri(uri));
                     });
                 });
             });
@@ -841,7 +840,7 @@ export function activate(context: vscode.ExtensionContext) {
                             );
                             return;
                         }
-                        target.upload(uri);
+                        target.upload(uri, getUploadSourceUri(uri));
                     });
                 });
             });

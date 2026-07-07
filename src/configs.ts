@@ -1,13 +1,19 @@
+import * as jsonc from "jsonc-parser";
 import { TextEncoder } from "util";
 import * as vscode from "vscode";
 import { Extension } from "./extension";
 import { ConfigsInterface, TargetOptionsInterface } from "./targets/Interfaces";
+import fs = require("fs");
 
 export class Configs {
+    private static readonly CONFIG_FILE_NAME_JSONC = "pro-deployer.jsonc";
+    private static readonly CONFIG_FILE_NAME_JSON = "pro-deployer.json";
+
     public static readonly sampleConfig: ConfigsInterface = {
         enableStatusBarItem: true,
         enableQuickPick: true,
         uploadOnSave: true,
+        ignoreSourceParentPaths: false,
         autoDelete: true,
         checkGitignore: false,
         reconnectOnTimeout: true,
@@ -48,6 +54,7 @@ export class Configs {
         enableQuickPick: true,
         autoDelete: true,
         uploadOnSave: true,
+        ignoreSourceParentPaths: false,
         checkGitignore: false,
         concurrency: 5,
         reconnectOnTimeout: true,
@@ -58,19 +65,42 @@ export class Configs {
         targets: [],
     };
     private static configs: ConfigsInterface = Configs.defaultConfigs;
-    private static workspaceConfigs: { [index: string]: ConfigsInterface } = {};
+    private static workspaceConfigs: { [index: string]: ConfigsInterface; } = {};
+
+    private static getConfigUri(workspaceFolder: vscode.WorkspaceFolder, fileName: string): vscode.Uri {
+        return vscode.Uri.file(workspaceFolder.uri.path + "/.vscode/" + fileName);
+    }
+
+    private static getWorkspaceConfigFile(workspaceFolder: vscode.WorkspaceFolder): vscode.Uri {
+        const jsoncFile = this.getConfigUri(workspaceFolder, this.CONFIG_FILE_NAME_JSONC);
+        const jsonFile = this.getConfigUri(workspaceFolder, this.CONFIG_FILE_NAME_JSON);
+
+        if (fs.existsSync(jsoncFile.fsPath)) {
+            return jsoncFile;
+        }
+        if (fs.existsSync(jsonFile.fsPath)) {
+            return jsonFile;
+        }
+
+        return jsoncFile;
+    }
 
     public static getConfigs() {
         return this.configs;
     }
     public static getConfigFile(): vscode.Uri {
-        return vscode.Uri.file(Extension.getActiveWorkspaceFolder()?.uri.path + "/.vscode/pro-deployer.json");
+        const workspaceFolder = Extension.getActiveWorkspaceFolder();
+        if (!workspaceFolder) {
+            return vscode.Uri.file("/.vscode/" + this.CONFIG_FILE_NAME_JSONC);
+        }
+
+        return this.getWorkspaceConfigFile(workspaceFolder);
     }
     public static getWorkspaceConfigs(uri?: vscode.Uri): ConfigsInterface {
         if (uri) {
             const workspaceFolder = vscode.workspace.getWorkspaceFolder(uri);
             if (workspaceFolder) {
-                return this.workspaceConfigs[workspaceFolder.uri.path + "/.vscode/pro-deployer.json"];
+                return this.workspaceConfigs[workspaceFolder.uri.path] ?? this.configs;
             }
         }
         const activeEditor = vscode.window.activeTextEditor;
@@ -78,7 +108,7 @@ export class Configs {
             const activeDocumentUri = activeEditor.document.uri;
             const workspaceFolder = vscode.workspace.getWorkspaceFolder(activeDocumentUri);
             if (workspaceFolder) {
-                return this.workspaceConfigs[workspaceFolder.uri.path + "/.vscode/pro-deployer.json"];
+                return this.workspaceConfigs[workspaceFolder.uri.path] ?? this.configs;
             }
         }
         return this.configs;
@@ -87,7 +117,7 @@ export class Configs {
         const files = [] as vscode.Uri[];
         if (vscode.workspace.workspaceFolders) {
             vscode.workspace.workspaceFolders.forEach((folder) => {
-                files.push(vscode.Uri.file(folder.uri.path + "/.vscode/pro-deployer.json"));
+                files.push(this.getWorkspaceConfigFile(folder));
             });
         }
         return files;
@@ -96,7 +126,7 @@ export class Configs {
         options: TargetOptionsInterface;
         workspaceFolder: vscode.WorkspaceFolder;
     }[] {
-        const targets = [] as { options: TargetOptionsInterface; workspaceFolder: vscode.WorkspaceFolder }[];
+        const targets = [] as { options: TargetOptionsInterface; workspaceFolder: vscode.WorkspaceFolder; }[];
         Object.keys(this.workspaceConfigs).forEach((key) => {
             if (this.workspaceConfigs[key].targets) {
                 this.workspaceConfigs[key].targets?.forEach((target) => {
@@ -119,8 +149,18 @@ export class Configs {
         }
 
         const configFile = vscode.Uri.file(
-            Extension.getActiveWorkspaceFolder()?.uri.path + "/.vscode/pro-deployer.json"
+            Extension.getActiveWorkspaceFolder()?.uri.path + "/.vscode/" + this.CONFIG_FILE_NAME_JSONC
         );
+        const legacyConfigFile = vscode.Uri.file(
+            Extension.getActiveWorkspaceFolder()?.uri.path + "/.vscode/" + this.CONFIG_FILE_NAME_JSON
+        );
+
+        if (fs.existsSync(legacyConfigFile.fsPath) && !fs.existsSync(configFile.fsPath)) {
+            Extension.showErrorMessage(
+                "Legacy config file already exists. Rename it to .jsonc or remove it first. Path: " + legacyConfigFile.fsPath
+            );
+            return;
+        }
 
         vscode.workspace.fs.stat(configFile).then(
             (fileStat) => {
@@ -156,7 +196,12 @@ export class Configs {
 
                 let fileConfigs = {} as ConfigsInterface;
                 try {
-                    fileConfigs = JSON.parse(value.toString());
+                    const errors: jsonc.ParseError[] = [];
+                    fileConfigs = jsonc.parse(value.toString(), errors);
+                    if (errors.length > 0) {
+                        Extension.showErrorMessage("Can't parse config file. Check config syntax.");
+                        return;
+                    }
                 } catch (error) {
                     Extension.showErrorMessage("Can't parse config file. Check config syntax.");
                     return;
@@ -169,7 +214,10 @@ export class Configs {
                 if (index === 0) {
                     this.configs = configs;
                 }
-                this.workspaceConfigs[file.path] = configs;
+                const workspaceFolder = vscode.workspace.getWorkspaceFolder(file);
+                if (workspaceFolder) {
+                    this.workspaceConfigs[workspaceFolder.uri.path] = configs;
+                }
                 Extension.appendLineToOutputChannel("[INFO] The config file is loaded: " + JSON.stringify(configs));
             });
         });
@@ -190,7 +238,12 @@ export class Configs {
 
                 let fileConfigs = {} as ConfigsInterface;
                 try {
-                    fileConfigs = JSON.parse(e.getText());
+                    const errors: jsonc.ParseError[] = [];
+                    fileConfigs = jsonc.parse(e.getText(), errors);
+                    if (errors.length > 0) {
+                        Extension.showErrorMessage("Can't parse config file. Check config syntax.");
+                        return;
+                    }
                 } catch (error) {
                     Extension.showErrorMessage("Can't parse config file. Check config syntax.");
                     return;
@@ -222,7 +275,12 @@ export class Configs {
 
                         let fileConfigs = {} as ConfigsInterface;
                         try {
-                            fileConfigs = JSON.parse(value.toString());
+                            const errors: jsonc.ParseError[] = [];
+                            fileConfigs = jsonc.parse(value.toString(), errors);
+                            if (errors.length > 0) {
+                                Extension.showErrorMessage("Can't parse config file. Check config syntax.");
+                                return;
+                            }
                         } catch (error) {
                             Extension.showErrorMessage("Can't parse config file. Check config syntax.");
                             return;
@@ -235,7 +293,10 @@ export class Configs {
                         if (index === 0) {
                             this.configs = configs;
                         }
-                        this.workspaceConfigs[file.path] = configs;
+                        const workspaceFolder = vscode.workspace.getWorkspaceFolder(file);
+                        if (workspaceFolder) {
+                            this.workspaceConfigs[workspaceFolder.uri.path] = configs;
+                        }
 
                         Extension.appendLineToOutputChannel(
                             "[INFO] The config file is loaded: " + JSON.stringify(this.configs)
