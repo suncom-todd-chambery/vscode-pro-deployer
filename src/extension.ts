@@ -109,12 +109,14 @@ export class Extension {
 
     public static updateStatusBarItem() {
         if (Extension.statusBarItem && Configs.getConfigs().enableStatusBarItem) {
-            const icon = Extension.syncEnabled ? "$(sync)" : "$(debug-pause)";
             const activeTargets = Targets.getActive();
             const targetNames = activeTargets.length > 0
                 ? ` (${activeTargets.map(t => t.getName()).join(", ")})`
                 : "";
-            Extension.statusBarItem.text = `${icon} PRO Deployer+${targetNames}`;
+            Extension.statusBarItem.text = `PRO Deployer+${targetNames}`;
+            Extension.statusBarItem.backgroundColor = Extension.syncEnabled
+                ? new vscode.ThemeColor("statusBarItem.warningBackground")
+                : undefined;
         }
     }
 
@@ -138,11 +140,11 @@ export class Extension {
     public static setConnectionError(hasError: boolean) {
         if (Extension.statusBarItem && Configs.getConfigs().enableStatusBarItem) {
             if (hasError) {
-                Extension.statusBarItem.text = "$(warning) PRO Deployer+";
+                Extension.statusBarItem.text = "PRO Deployer+";
                 Extension.statusBarItem.backgroundColor = new vscode.ThemeColor("statusBarItem.errorBackground");
                 Extension.statusBarItem.tooltip = "Connection error - unable to reconnect";
             } else {
-                Extension.statusBarItem.text = "$(sync) PRO Deployer+";
+                Extension.statusBarItem.text = "PRO Deployer+";
                 Extension.statusBarItem.backgroundColor = undefined;
                 Extension.statusBarItem.tooltip = "";
             }
@@ -330,12 +332,11 @@ export function activate(context: vscode.ExtensionContext) {
         Targets.getItems().forEach((target) => {
             target.getQueue().on("start", () => {
                 if (Configs.getConfigs().enableStatusBarItem) {
-                    const icon = Extension.isSyncEnabled() ? "$(sync~spin)" : "$(debug-pause)";
                     const activeTargets = Targets.getActive();
                     const targetNames = activeTargets.length > 0
                         ? ` (${activeTargets.map(t => t.getName()).join(", ")})`
                         : "";
-                    Extension.statusBarItem!.text = `${icon} PRO Deployer+${targetNames}`;
+                    Extension.statusBarItem!.text = `PRO Deployer+${targetNames}`;
 
                     if (!statusBarCheckTimer) {
                         statusBarCheckTimer = setInterval(() => {
@@ -345,7 +346,7 @@ export function activate(context: vscode.ExtensionContext) {
                             });
                             if (allPendingTasks > 1) {
                                 Extension.statusBarItem!.text =
-                                    "$(sync~spin) PRO Deployer+: " + (allPendingTasks + 1) + "...";
+                                    "PRO Deployer+: " + (allPendingTasks + 1) + "...";
                                 Extension.statusBarItem!.tooltip = tooltipText;
                             }
                         }, 300);
@@ -407,14 +408,15 @@ export function activate(context: vscode.ExtensionContext) {
                     });
 
                     if (allPendingTasks === 0) {
-                        const icon = Extension.isSyncEnabled() ? "$(sync)" : "$(debug-pause)";
                         const activeTargets = Targets.getActive();
                         const targetNames = activeTargets.length > 0
                             ? ` (${activeTargets.map(t => t.getName()).join(", ")})`
                             : "";
-                        Extension.statusBarItem!.text = `${icon} PRO Deployer+${targetNames}`;
+                        Extension.statusBarItem!.text = `PRO Deployer+${targetNames}`;
                         Extension.statusBarItem!.tooltip = "Click to toggle syncing on/off";
-                        Extension.statusBarItem!.backgroundColor = undefined;
+                        Extension.statusBarItem!.backgroundColor = Extension.isSyncEnabled()
+                            ? new vscode.ThemeColor("statusBarItem.warningBackground")
+                            : undefined;
                         if (statusBarCheckTimer) {
                             clearInterval(statusBarCheckTimer);
                             statusBarCheckTimer = undefined;

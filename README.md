@@ -40,9 +40,9 @@ If you like this extension, you could become a backer or sponsor via **[PayPal](
 
 ## Example Configs
 
-Config file location: `${workspaceFolder}/.vscode/pro-deployer.json`
+Config file location: `${workspaceFolder}/.vscode/pro-deployer.jsonc`
 
-```js
+```jsonc
 {
     "enableStatusBarItem": true, //enable extension status bar item
     "enableQuickPick": true, //enable quick pick when upload/error occurs

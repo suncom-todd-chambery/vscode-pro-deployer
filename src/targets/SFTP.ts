@@ -1,5 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
+import type { Client as SSH2Client, SFTPWrapper as SSH2SFTPWrapper } from "ssh2";
 import * as vscode from "vscode";
 import { Queue } from "../Queue";
 import { Configs } from "../configs";
@@ -7,12 +8,21 @@ import { Extension } from "../extension";
 import { QueueTask, TargetInterface, TargetOptionsInterface } from "./Interfaces";
 import { Target } from "./Target";
 import { Targets } from "./Targets";
-import ssh2 = require("ssh2");
 import EventEmitter = require("events");
 
+const nodeUtil = require("util") as {
+    isDate?: (value: unknown) => boolean;
+};
+
+if (typeof nodeUtil.isDate !== "function") {
+    nodeUtil.isDate = (value: unknown): boolean => value instanceof Date;
+}
+
+const ssh2: typeof import("ssh2") = require("ssh2");
+
 export class SFTP extends Target implements TargetInterface {
-    private client: ssh2.Client | null = null;
-    private sftp: ssh2.SFTPWrapper | null = null;
+    private client: SSH2Client | null = null;
+    private sftp: SSH2SFTPWrapper | null = null;
     private name: string;
     private isConnected: boolean = false;
     private isConnecting: boolean = false;
@@ -23,6 +33,7 @@ export class SFTP extends Target implements TargetInterface {
     private reconnectDelay: number = 2000;
     private lastUploadTime: number = 0;
     private idleCheckInterval: NodeJS.Timer | null = null;
+    private uploadTimeouts: Map<string, NodeJS.Timeout> = new Map();
     private readonly UPLOAD_TIMEOUT = 60 * 1000; // 60 seconds
     private readonly IDLE_TIMEOUT = 40 * 60 * 1000; // 40 minutes
     private readonly IDLE_CHECK_FREQUENCY = 60 * 1000; // 1 minute
@@ -72,7 +83,7 @@ export class SFTP extends Target implements TargetInterface {
 
         if (this.client) {
             this.client.once("ready", () => {
-                this.client?.sftp((err: any, sftpClient: ssh2.SFTPWrapper) => {
+                this.client?.sftp((err: any, sftpClient: SSH2SFTPWrapper) => {
                     if (!err) {
                         this.sftp = sftpClient;
 
@@ -141,7 +152,13 @@ export class SFTP extends Target implements TargetInterface {
                 let uploadReadStream: fs.ReadStream | null = null;
                 let uploadWriteStream: any = null;
                 let isTimeout = false;
+                this.clearUploadTimeout(relativePath);
                 const timer = setTimeout(() => {
+                    // Ignore stale timeout handlers from older attempts for the same file.
+                    if (this.uploadTimeouts.get(relativePath) !== timer) {
+                        return;
+                    }
+                    this.uploadTimeouts.delete(relativePath);
                     isTimeout = true;
                     if (uploadReadStream) {
                         uploadReadStream.destroy();
@@ -180,6 +197,7 @@ export class SFTP extends Target implements TargetInterface {
                         cb("Upload timeout");
                     }
                 }, this.UPLOAD_TIMEOUT);
+                this.uploadTimeouts.set(relativePath, timer);
 
                 const remoteRelativeDir = path.dirname(relativePath);
                 const mkdirPromise = remoteRelativeDir !== "."
@@ -190,7 +208,7 @@ export class SFTP extends Target implements TargetInterface {
                     if (isTimeout) { return; }
                     Extension.appendLineToOutputChannel("[INFO][SFTP] Start uploading file: " + relativePath);
                     if (!this.sftp) {
-                        clearTimeout(timer);
+                        this.clearUploadTimeout(relativePath);
                         cb("SFTP client missing");
                         reject("SFTP client missing");
                         return;
@@ -202,7 +220,7 @@ export class SFTP extends Target implements TargetInterface {
                             return;
                         }
                         isFinished = true;
-                        clearTimeout(timer);
+                        this.clearUploadTimeout(relativePath);
                         Extension.appendLineToOutputChannel(
                             "[ERROR][SFTP] Can't upload file: " + uri.path + ". Error: " + reason
                         );
@@ -220,7 +238,7 @@ export class SFTP extends Target implements TargetInterface {
                             return;
                         }
                         isFinished = true;
-                        clearTimeout(timer);
+                        this.clearUploadTimeout(relativePath);
                         Extension.appendLineToOutputChannel(
                             "[INFO][SFTP] File: '" +
                             relativePath +
@@ -237,7 +255,7 @@ export class SFTP extends Target implements TargetInterface {
                     uploadReadStream.pipe(uploadWriteStream);
                 }, (reason: Error) => {
                     if (isTimeout) { return; }
-                    clearTimeout(timer);
+                    this.clearUploadTimeout(relativePath);
                     Extension.appendLineToOutputChannel(
                         "[ERROR][SFTP] Can't create remote dir for: " + relativePath + ". Error: " + reason
                     );
@@ -309,7 +327,7 @@ export class SFTP extends Target implements TargetInterface {
                     return;
                 }
                 Extension.appendLineToOutputChannel("[INFO][SFTP] Read file: '" + relativePath);
-                this.sftp.readFile(this.options.dir + relativePath, {}, (err, handle) => {
+                this.sftp.readFile(this.options.dir + relativePath, {}, (err: any, handle: Buffer) => {
                     if (err) {
                         cb(err);
                         reject(err);
@@ -360,7 +378,7 @@ export class SFTP extends Target implements TargetInterface {
                 const readDir = (dir: string): Promise<any> => {
                     return new Promise<any>((readDirResolve, readDirReject) => {
                         Extension.appendLineToOutputChannel("[INFO][SFTP] Start read dir: '" + dir);
-                        this.sftp?.readdir(this.options.dir + dir, (err, list) => {
+                        this.sftp?.readdir(this.options.dir + dir, (err: any, list: any[]) => {
                             if (err) {
                                 Extension.appendLineToOutputChannel(
                                     "[ERROR][SFTP] Can't read dir: '" + dir + "'. Error: " + err
@@ -372,7 +390,7 @@ export class SFTP extends Target implements TargetInterface {
                             Extension.appendLineToOutputChannel("[INFO][SFTP] Dir files: " + list.length);
                             let statPromises: Promise<vscode.Uri>[] = [];
 
-                            list.forEach((item) => {
+                            list.forEach((item: any) => {
                                 statPromises.push(
                                     new Promise<vscode.Uri>((statResolve, statReject) => {
                                         const file = vscode.Uri.file(
@@ -382,7 +400,7 @@ export class SFTP extends Target implements TargetInterface {
                                             "/" +
                                             item.filename
                                         );
-                                        this.sftp?.stat(this.options.dir + dir + "/" + item.filename, (err, stats) => {
+                                        this.sftp?.stat(this.options.dir + dir + "/" + item.filename, (err: any, stats: any) => {
                                             if (err) {
                                                 Extension.appendLineToOutputChannel(
                                                     "[ERROR][SFTP] Can't get stat for: '" +
@@ -457,7 +475,7 @@ export class SFTP extends Target implements TargetInterface {
                     reject("SFTP client missing");
                     return;
                 }
-                this.client.exec("rm -rf " + dir, (err, channel) => {
+                this.client.exec("rm -rf " + dir, (err: any, channel: any) => {
                     if (err) {
                         cb(err.message);
                         reject(err.message);
@@ -499,7 +517,7 @@ export class SFTP extends Target implements TargetInterface {
                             () => {
                                 this.sftp?.mkdir(dir, (err: any) => {
                                     if (err) {
-                                        this.sftp?.exists(dir, (response) => {
+                                        this.sftp?.exists(dir, (response: boolean) => {
                                             if (!response) {
                                                 reject(err);
                                                 return;
@@ -512,7 +530,7 @@ export class SFTP extends Target implements TargetInterface {
                                 });
                             },
                             (err) => {
-                                this.sftp?.exists(dir, (response) => {
+                                this.sftp?.exists(dir, (response: boolean) => {
                                     if (!response) {
                                         reject(err);
                                         return;
@@ -523,7 +541,7 @@ export class SFTP extends Target implements TargetInterface {
                         );
                         return;
                     }
-                    this.sftp?.exists(dir, (response) => {
+                    this.sftp?.exists(dir, (response: boolean) => {
                         if (!response) {
                             reject(err);
                             return;
@@ -556,6 +574,10 @@ export class SFTP extends Target implements TargetInterface {
             clearInterval(this.idleCheckInterval);
             this.idleCheckInterval = null;
         }
+        this.uploadTimeouts.forEach((timer) => {
+            clearTimeout(timer);
+        });
+        this.uploadTimeouts.clear();
         this.isConnected = false;
         this.isConnecting = false;
         this.sftp = null;
@@ -667,5 +689,13 @@ export class SFTP extends Target implements TargetInterface {
                 Extension.appendLineToOutputChannel("[ERROR][SFTP] Reconnection failed: " + error);
             }
         );
+    }
+
+    private clearUploadTimeout(relativePath: string): void {
+        const existingTimer = this.uploadTimeouts.get(relativePath);
+        if (existingTimer) {
+            clearTimeout(existingTimer);
+            this.uploadTimeouts.delete(relativePath);
+        }
     }
 }
